@@ -1,0 +1,22 @@
+# Credentials — never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Output files (daily reports — large, transient)
+output/
+
+# Excel inputs (may contain sensitive position data)
+*.xlsx
+*.xls
+
+# Claude Code session memory (machine-local)
+memory/
+
+# macOS
+.DS_Store
