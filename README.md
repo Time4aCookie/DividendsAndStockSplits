@@ -33,7 +33,7 @@ cp .env.example .env
 
 Edit `.env`:
 ```
-EMAIL_SENDER=rohantatikonda@gmail.com
+EMAIL_SENDER=you@gmail.com
 EMAIL_PASSWORD=your_gmail_app_password
 EMAIL_RECIPIENTS=addr1@co.com,addr2@co.com,addr3@co.com,addr4@co.com,addr5@co.com
 ```
