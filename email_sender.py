@@ -1,5 +1,6 @@
 """
-Send the daily dividend/split report via Outlook SMTP.
+Send the daily dividend/split report via SMTP.
+Supports Gmail and Outlook — host is auto-detected from the sender address.
 Credentials are loaded from environment variables (see .env.example).
 """
 
@@ -13,8 +14,15 @@ from email import encoders
 from pathlib import Path
 
 
-SMTP_HOST = 'smtp.office365.com'
-SMTP_PORT = 587
+def _smtp_settings(sender: str) -> tuple[str, int]:
+    """Return (host, port) based on sender domain."""
+    domain = sender.split('@')[-1].lower() if '@' in sender else ''
+    if 'gmail' in domain:
+        return 'smtp.gmail.com', 587
+    if 'outlook' in domain or 'hotmail' in domain or 'live' in domain:
+        return 'smtp-mail.outlook.com', 587
+    # Default: Office 365 (covers custom domains on M365)
+    return 'smtp.office365.com', 587
 
 SENDER      = os.getenv('EMAIL_SENDER', '')
 PASSWORD    = os.getenv('EMAIL_PASSWORD', '')
@@ -82,7 +90,8 @@ def send_report(
         part.add_header('Content-Disposition', f'attachment; filename="{csv_path.name}"')
         msg.attach(part)
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+    smtp_host, smtp_port = _smtp_settings(SENDER)
+    with smtplib.SMTP(smtp_host, smtp_port) as server:
         server.ehlo()
         server.starttls()
         server.login(SENDER, PASSWORD)
