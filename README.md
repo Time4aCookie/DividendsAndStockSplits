@@ -44,21 +44,20 @@ EMAIL_RECIPIENTS=addr1@co.com,addr2@co.com,addr3@co.com,addr4@co.com,addr5@co.co
 
 ## Daily Usage
 
-### Step 1 — Run the Python scraper
+**Your only job:** drop the Excel file(s) into this folder, open Claude Code in this directory, and say:
+
+> "run the daily check"
+
+Claude handles everything from there — finds the files, runs the scraper, does its own independent check, compares the results, and sends the email. If there are discrepancies, Claude will ask you to verify before sending.
+
+To also check GTC orders, drop a GTC export (e.g. `gtc_orders.xlsx`) in the folder alongside the positions file before triggering the check.
+
+### If you need to run the script manually
 ```bash
-python check_events.py positions.xlsx
-# With GTC orders (see GTC section below):
-python check_events.py positions.xlsx --gtc gtc_orders.xlsx
-# Skip email while testing:
-python check_events.py positions.xlsx --no-email
-# Override target date:
-python check_events.py positions.xlsx --date 2025-01-15
+python check_events.py positions.xlsx [--gtc gtc_orders.xlsx] [--no-email] [--date YYYY-MM-DD]
 ```
 
-### Step 2 — Claude independent check
-Open Claude Code in this directory and say **"run the daily check"**. Claude will follow the workflow in `CLAUDE.md`, independently fetch all sources, write `output/claude_results_YYYY-MM-DD.json`, and trigger the comparison.
-
-### Step 3 — Review discrepancies
+### Review discrepancies
 Any finding that only one side caught is flagged as **MANUAL VERIFICATION REQUIRED** in both the console output and the email. Do not act on a discrepancy without verifying it yourself.
 
 ---

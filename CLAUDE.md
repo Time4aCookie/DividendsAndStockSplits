@@ -3,79 +3,108 @@
 ## What this project does
 After market close each trading day, check every equity position (and any GTC orders)
 for stock splits and dividend ex-dates occurring the **next trading day**.
-The Python script scrapes multiple data sources automatically.
-Claude independently verifies those findings, then both results are compared.
-Any discrepancy is flagged for **manual verification** before acting — real money depends on this.
+Claude runs everything — the user's only job is to drop the Excel file(s) in this
+folder and say "run the daily check."
 
 ---
 
-## Daily Workflow (run in this order)
+## How to trigger the daily check
 
-### Step 1 — Run the Python script
+The user will say something like:
+- "run the daily check"
+- "check today's events"
+- "run the workflow"
+
+When this happens, follow the steps below **without asking the user to type anything
+in the terminal.** Claude runs all scripts directly.
+
+---
+
+## Daily Workflow — Claude executes all of this
+
+### Step 1 — Find the Excel file(s)
+Run this to locate input files:
 ```bash
-python check_events.py positions.xlsx
-# If you also have GTC orders exported:
-python check_events.py positions.xlsx --gtc gtc_orders.xlsx
+ls *.xlsx 2>/dev/null || ls *.xls 2>/dev/null
+```
+- The **positions file** matches: `position*.xlsx`, `holding*.xlsx`, or is the only `.xlsx` present.
+- The **GTC file** matches: `gtc*.xlsx`, `order*.xlsx`, `gtc*.xls`.
+- If multiple ambiguous files are found, show the list and ask the user which is positions vs GTC.
+- If no file is found, tell the user to drop the Excel into this folder and try again.
+
+### Step 2 — Determine the target date
+```bash
+date +%Y-%m-%d
+```
+Target = next **trading day** from today (skip Saturday and Sunday).
+Note: does NOT account for market holidays — on holiday eves, mention this to the user.
+
+### Step 3 — Run the Python scraper
+```bash
+python check_events.py <positions_file> [--gtc <gtc_file>]
+# Add --no-email here — Claude will handle the email decision after comparison
+python check_events.py <positions_file> --no-email
 ```
 This produces:
-- `output/python_results_YYYY-MM-DD.csv`  — structured results
-- `output/python_results_YYYY-MM-DD.json` — used for Claude comparison
+- `output/python_results_YYYY-MM-DD.csv`
+- `output/python_results_YYYY-MM-DD.json`
 
-Add `--no-email` to skip emailing while testing.
+### Step 4 — Claude's independent check
+Independently fetch every source below. Do NOT skip any — cross-coverage is the whole
+point of the dual-check system.
 
-### Step 2 — Claude's independent check (this session)
-When the user starts a Claude Code session in this directory and says
-"run the daily check" or "check today's events", follow these exact steps:
+**Splits** (check for target date):
+- `https://api.nasdaq.com/api/calendar/splits?date=YYYY-MM-DD` (JSON)
+- `https://www.nasdaq.com/market-activity/stock-splits` (HTML, scan for target date)
+- `https://www.nasdaqtrader.com/dynamic/splits/splits.txt` (pipe-delimited, scan for target date)
+- `https://www.tipranks.com/api/calendar/stock-splits/` (JSON)
+- `https://stockanalysis.com/actions/splits/` (upcoming section)
 
-1. **Read the positions file** the user provides or that exists in the working directory.
-   Parse the ticker column. If ambiguous, ask.
+**Dividends** (ex-date = target date):
+- `https://api.nasdaq.com/api/calendar/dividends?date=YYYY-MM-DD` (JSON)
+- `https://stockanalysis.com/dividends/calendar/?date=YYYY-MM-DD`
+- `https://www.marketbeat.com/dividends/ex-dividend-date/YYYY-MM-DD/`
+- `https://www.earningswhispers.com/dividend/YYYY-MM-DD`
+- `https://finviz.com/calendar.ashx` (dividends tab, filter by date)
 
-2. **Determine the target date**: next trading day from today (skip weekends).
-   Today is available via `date` in the shell. Skip Sat/Sun. Note: this does NOT
-   account for market holidays — verify manually on holiday eves.
+Filter all results: only keep tickers whose **underlying** matches a position.
 
-3. **Extract underlying tickers** using the rules below before checking any source.
+### Step 5 — Write Claude's findings
+Write to `output/claude_results_YYYY-MM-DD.json`:
+```json
+[
+  {"underlying": "AAPL", "event_type": "dividend", "amount_or_ratio": "0.25", "sources": ["NASDAQ", "StockAnalysis"]},
+  {"underlying": "TSLA", "event_type": "split",    "amount_or_ratio": "3:1",   "sources": ["NASDAQTrader"]}
+]
+```
+Write `[]` if nothing found — this signals the check completed with no hits.
 
-4. **Check ALL splits sources** for the target date:
-   - https://www.nasdaq.com/market-activity/stock-splits (look for the target date)
-   - https://api.nasdaq.com/api/calendar/splits?date=YYYY-MM-DD (JSON API)
-   - https://www.nasdaqtrader.com/dynamic/splits/splits.txt (pipe-delimited file)
-   - https://www.tipranks.com/api/calendar/stock-splits/ (JSON endpoint)
-   - https://stockanalysis.com/actions/splits/ (look for upcoming section)
+### Step 6 — Run comparison
+```bash
+python check_events.py <positions_file> --no-email
+```
+The script detects the Claude JSON and runs `compare.py` automatically, printing agreements and discrepancies.
 
-5. **Check ALL dividend sources** for ex-dividend dates matching the target date:
-   - https://api.nasdaq.com/api/calendar/dividends?date=YYYY-MM-DD (JSON API)
-   - https://stockanalysis.com/dividends/calendar/?date=YYYY-MM-DD
-   - https://www.marketbeat.com/dividends/ex-dividend-date/YYYY-MM-DD/
-   - https://www.earningswhispers.com/dividend/YYYY-MM-DD
-   - https://finviz.com/calendar.ashx (dividends section, filter by date)
+### Step 7 — Report to the user
+Present a clear summary:
+- Splits found (ticker, ratio, confirmed by which sources)
+- Dividends found (ticker, amount, confirmed by which sources)
+- GTC orders affected (if GTC file was provided)
+- Discrepancies — call these out explicitly: **"NEEDS MANUAL VERIFICATION"**
+- Items agreed on by both
 
-6. **Filter results** — only report tickers where the UNDERLYING matches a position.
+### Step 8 — Send the email
+If there are **no discrepancies**: send automatically.
+```bash
+python check_events.py <positions_file>
+```
 
-7. **Write Claude's findings** to `output/claude_results_YYYY-MM-DD.json` in this format:
-   ```json
-   [
-     {"underlying": "AAPL", "event_type": "dividend", "amount_or_ratio": "0.25", "sources": ["NASDAQ", "StockAnalysis"]},
-     {"underlying": "TSLA", "event_type": "split",    "amount_or_ratio": "3:1",   "sources": ["NASDAQTrader"]}
-   ]
-   ```
-   Write an empty array `[]` if nothing found — this signals the check ran.
+If there are **discrepancies**: tell the user what they are, then ask:
+> "There are X discrepancies that need manual verification (listed above).
+> Do you want me to send the email now with the discrepancies flagged in red,
+> or verify first and send after?"
 
-8. **Re-run the Python script** with `--no-email` to trigger comparison:
-   ```bash
-   python check_events.py positions.xlsx --no-email
-   ```
-
-9. **Report findings to the user** clearly:
-   - List splits and dividends found
-   - List GTC orders affected (if GTC file provided)
-   - Call out every discrepancy with Python in bold — these need manual verification
-   - Confirm which items both sources agree on
-
-10. **Send the email** (ask user to confirm first if there are discrepancies):
-    ```bash
-    python check_events.py positions.xlsx
-    ```
+Only send after the user confirms.
 
 ---
 
@@ -90,7 +119,7 @@ Apply in this order — first match wins:
 | Right | `ACMR.R`, `ACMRR` | Strip `.R`/trailing `R` |
 | Unit | `ACMR.U`, `ACMRU` | Strip `.U`/trailing `U` |
 | Preferred | `BAC.PA`, `BAC-PA`, `BACPA`, `BACPRA` | Strip preferred suffix; check underlying `BAC` |
-| Share class | `GOOGL`, `BRK.A`, `BRK-B` | Keep full ticker; it IS the common stock for splits/divs |
+| Share class | `BRK.A`, `BRK-B` | Keep full ticker; it IS the common stock |
 | Common stock | `AAPL` | No change |
 
 When in doubt, err on the side of checking — a false positive is cheaper than a miss.
@@ -99,36 +128,37 @@ When in doubt, err on the side of checking — a false positive is cheaper than 
 
 ## GTC Order Adjustment Logic
 
-> **Note:** GTC export format is being confirmed. This section will be updated.
+> **Note:** GTC export format is being confirmed. This section will be updated Monday.
 
 When a position has a split or dividend ex-date tomorrow:
 
 **Dividends:**
-- Flag any open BUY limit orders at or below the pre-dividend price.
-  The stock will open roughly `dividend_amount` lower on ex-date.
+- Flag any open BUY limit orders — the stock opens ~`dividend_amount` lower on ex-date.
   Suggest adjusting the limit down by the dividend amount.
-- Flag any open SELL limit orders for the same reason.
+- Flag open SELL limit orders for the same reason.
 
 **Stock Splits:**
 - Flag ALL open orders on the underlying.
-  Buy/sell price must be divided by the split ratio.
-  Share quantity must be multiplied by the split ratio.
-  Some brokers auto-adjust for splits — confirm with the broker before adjusting manually.
+  Price ÷ split ratio, quantity × split ratio.
+  Some brokers auto-adjust for splits — note this and tell the user to confirm with their broker.
 
 ---
 
 ## Email Configuration
 
 Sender: `rohant@jagtradingllc.com`
-Recipients: stored in `.env` as `EMAIL_RECIPIENTS` (comma-separated, 5 addresses)
+Recipients: 5 addresses stored in `.env` as `EMAIL_RECIPIENTS` (comma-separated).
 
 ### First-time setup on a new machine
-1. `cp .env.example .env`
-2. Fill in `EMAIL_PASSWORD` with your Outlook app password.
-   To generate: Office 365 → Security → App passwords (or ask IT if MFA is managed by the firm).
-3. Fill in the 5 `EMAIL_RECIPIENTS`.
-4. `pip install -r requirements.txt`
-5. Test: `python check_events.py positions.xlsx --no-email`
+```bash
+git clone https://github.com/Time4aCookie/DividendsAndStockSplits.git
+cd DividendsAndStockSplits
+pip install -r requirements.txt
+cp .env.example .env
+# Fill in EMAIL_PASSWORD and EMAIL_RECIPIENTS in .env
+```
+App password: Office 365 → Security → App passwords.
+If your firm disables app passwords, ask to switch to Microsoft Graph API auth.
 
 ---
 
@@ -136,45 +166,45 @@ Recipients: stored in `.env` as `EMAIL_RECIPIENTS` (comma-separated, 5 addresses
 
 | File | Description |
 |---|---|
-| `output/python_results_YYYY-MM-DD.csv` | Python script findings (attach to email) |
-| `output/python_results_YYYY-MM-DD.json` | Python findings in JSON (for comparison) |
-| `output/claude_results_YYYY-MM-DD.json` | Claude's findings (written by Claude in Step 7) |
+| `output/python_results_YYYY-MM-DD.csv` | Python findings — attached to email |
+| `output/python_results_YYYY-MM-DD.json` | Python findings in JSON — used for comparison |
+| `output/claude_results_YYYY-MM-DD.json` | Claude's findings — written in Step 5 |
 
-The `output/` directory is gitignored. Excel input files are also gitignored.
+The `output/` directory and all `.xlsx` files are gitignored.
 
 ---
 
 ## Discrepancy Policy
 
-When Python and Claude disagree on a finding:
-- **Claude-only finding**: Likely real — Python scraper may have missed it.
-  VERIFY MANUALLY before assuming it's a false positive.
-- **Python-only finding**: Could be a scraper artifact or Claude missed a source.
-  VERIFY MANUALLY before discarding.
-- Never act on a discrepancy without manual confirmation.
-  The email will highlight these in red.
+| Scenario | Likely cause | Action |
+|---|---|---|
+| Both agree | High confidence | Proceed |
+| Claude only | Python scraper missed it | **Verify manually before acting** |
+| Python only | Claude missed a source | **Verify manually before acting** |
+
+Never act on a discrepancy without human confirmation. The email flags these in red.
 
 ---
 
 ## Data Sources Reference
 
 ### Splits
-| Source | URL | Notes |
-|---|---|---|
-| NASDAQ calendar | `nasdaq.com/market-activity/stock-splits` | Best primary source |
-| NASDAQ API | `api.nasdaq.com/api/calendar/splits?date=` | JSON, most reliable |
-| NASDAQTrader | `nasdaqtrader.com/dynamic/splits/splits.txt` | Daily pipe-delimited file |
-| TipRanks | `tipranks.com/calendars/stock-splits/upcoming` | Good secondary source |
-| StockAnalysis | `stockanalysis.com/actions/splits/` | Upcoming section |
+| Source | URL |
+|---|---|
+| NASDAQ API | `api.nasdaq.com/api/calendar/splits?date=` |
+| NASDAQ HTML | `nasdaq.com/market-activity/stock-splits` |
+| NASDAQTrader | `nasdaqtrader.com/dynamic/splits/splits.txt` |
+| TipRanks | `tipranks.com/api/calendar/stock-splits/` |
+| StockAnalysis | `stockanalysis.com/actions/splits/` |
 
 ### Dividends
-| Source | URL | Notes |
-|---|---|---|
-| NASDAQ API | `api.nasdaq.com/api/calendar/dividends?date=` | JSON, most reliable |
-| StockAnalysis | `stockanalysis.com/dividends/calendar/?date=` | Good coverage |
-| MarketBeat | `marketbeat.com/dividends/ex-dividend-date/` | Cross-reference |
-| EarningsWhispers | `earningswhispers.com/dividend/` | Additional cross-reference |
-| Finviz | `finviz.com/calendar.ashx` | Dividends tab |
+| Source | URL |
+|---|---|
+| NASDAQ API | `api.nasdaq.com/api/calendar/dividends?date=` |
+| StockAnalysis | `stockanalysis.com/dividends/calendar/?date=` |
+| MarketBeat | `marketbeat.com/dividends/ex-dividend-date/` |
+| EarningsWhispers | `earningswhispers.com/dividend/` |
+| Finviz | `finviz.com/calendar.ashx` |
 
 ---
 
@@ -182,14 +212,13 @@ When Python and Claude disagree on a finding:
 
 ```
 DividendsAndStockSplits/
-├── CLAUDE.md            ← You are here. Full instructions for any machine.
-├── check_events.py      ← Main script (run daily)
+├── CLAUDE.md            ← You are here. Full workflow for any machine.
+├── check_events.py      ← Main script (Claude runs this, not the user)
 ├── scrapers.py          ← All web scraping logic
 ├── ticker_utils.py      ← Ticker parsing & underlying extraction
 ├── email_sender.py      ← Outlook SMTP email
 ├── compare.py           ← Python vs Claude comparison
 ├── requirements.txt
 ├── .env.example         ← Copy to .env and fill in credentials
-├── .env                 ← GITIGNORED — credentials live here only
-└── output/              ← GITIGNORED — daily CSV/JSON reports
+└── .env                 ← GITIGNORED — credentials only
 ```
