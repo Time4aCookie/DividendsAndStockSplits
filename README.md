@@ -11,7 +11,7 @@ Daily automation for equity traders. After market close, checks all positions (a
 3. Both results are compared — discrepancies are highlighted in the email and console.
 4. A formatted HTML email with the attached CSV is sent to 5 recipients.
 
-Instruments handled: common stocks, warrants, rights, preferred stock, options (OCC format), and multiple share classes. All non-common instruments are mapped to their underlying ticker before checking.
+Instruments handled: common stocks, warrants, rights, preferred stock, options (OCC format and human-readable format like `AMPG Oct 16 2026 7.50 CALL`), and multiple share classes. All non-common instruments are mapped to their underlying ticker before checking.
 
 ---
 
@@ -20,7 +20,7 @@ Instruments handled: common stocks, warrants, rights, preferred stock, options (
 ### Requirements
 - Python 3.11+
 - GitHub account with access to this repo
-- Outlook account (sender) with SMTP app password
+- Gmail account (sender) with an app password
 
 ### Install
 
@@ -33,12 +33,12 @@ cp .env.example .env
 
 Edit `.env`:
 ```
-EMAIL_SENDER=rohant@jagtradingllc.com
-EMAIL_PASSWORD=your_outlook_app_password
+EMAIL_SENDER=rohantatikonda@gmail.com
+EMAIL_PASSWORD=your_gmail_app_password
 EMAIL_RECIPIENTS=addr1@co.com,addr2@co.com,addr3@co.com,addr4@co.com,addr5@co.com
 ```
 
-> **App password**: Office 365 → Security → App passwords. If your firm disables app passwords, the email module can be swapped to Microsoft Graph API — open an issue.
+> **Gmail app password**: myaccount.google.com → Security → 2-Step Verification → App passwords. Name it "DividendsAndStockSplits" and use the 16-character code (no spaces) as `EMAIL_PASSWORD`. The SMTP host is auto-detected from the sender domain — Gmail and Outlook both work.
 
 ### Claude Code permission setup (skip all approval prompts)
 
@@ -88,6 +88,7 @@ Must contain a ticker column. Recognized column names: `ticker`, `symbol`, `sym`
 | AAPL   | 500          |
 | ACMR.WS| 1000         |
 | BAC-PA | 200          |
+| AMPG Oct 16 2026 7.50 CALL | 10 |
 
 Position size is loaded but not used for event checking — only the ticker matters.
 
@@ -102,7 +103,7 @@ Format TBD — will be added once the broker export format is confirmed.
 |---|---|
 | `output/python_results_YYYY-MM-DD.csv` | Python findings (attached to email) |
 | `output/python_results_YYYY-MM-DD.json` | Python findings in JSON (for Claude comparison) |
-| `output/claude_results_YYYY-MM-DD.json` | Claude's findings (written during Step 2) |
+| `output/claude_results_YYYY-MM-DD.json` | Claude's findings (written after its independent check) |
 
 The `output/` directory and all Excel files are gitignored.
 
@@ -111,20 +112,22 @@ The `output/` directory and all Excel files are gitignored.
 ## Data Sources
 
 ### Splits
-| Source | Notes |
-|---|---|
-| NASDAQ API (`api.nasdaq.com/api/calendar/splits`) | Primary |
-| NASDAQ HTML (`nasdaq.com/market-activity/stock-splits`) | Fallback |
-| NASDAQTrader (`nasdaqtrader.com/dynamic/splits/splits.txt`) | Daily pipe-delimited file |
-| TipRanks (`tipranks.com/api/calendar/stock-splits/`) | Secondary |
+| Source | Status | Notes |
+|---|---|---|
+| NASDAQ API (`api.nasdaq.com/api/calendar/splits`) | ✓ Working | Primary — filter by `executionDate` |
+| NASDAQ HTML (`nasdaq.com/market-activity/stock-splits`) | ✓ Working | Fallback |
+| NASDAQTrader (`nasdaqtrader.com/dynamic/splits/splits.txt`) | ✓ Working | Pipe-delimited daily file |
+| StockAnalysis (`stockanalysis.com/actions/splits/`) | ✓ Working | Cross-reference |
+| TipRanks splits page (`tipranks.com/calendars/stock-splits/upcoming`) | ⚠ API returns 403 | Use HTML page instead of API |
 
 ### Dividends
-| Source | Notes |
-|---|---|
-| NASDAQ API (`api.nasdaq.com/api/calendar/dividends`) | Primary |
-| StockAnalysis (`stockanalysis.com/dividends/calendar/`) | Secondary |
-| MarketBeat (`marketbeat.com/dividends/ex-dividend-date/`) | Cross-reference |
-| EarningsWhispers (`earningswhispers.com/dividend/`) | Cross-reference |
+| Source | Status | Notes |
+|---|---|---|
+| NASDAQ API (`api.nasdaq.com/api/calendar/dividends`) | ✓ Working | Primary — all rows returned are for the queried date |
+| MarketBeat (`marketbeat.com/dividends/ex-dividend-date/`) | ✓ Working | Cross-reference |
+| EarningsWhispers (`earningswhispers.com/dividend/`) | ⚠ Inconsistent | Use if available |
+| Finviz (`finviz.com/calendar.ashx`) | ⚠ JS-rendered | May not return data without a browser |
+| StockAnalysis dividends | ✗ Unreliable | URL returns 404 — skipped automatically |
 
 ---
 
@@ -136,7 +139,7 @@ DividendsAndStockSplits/
 ├── check_events.py      # Main script
 ├── scrapers.py          # Web scraping for all sources
 ├── ticker_utils.py      # Underlying ticker extraction
-├── email_sender.py      # Outlook SMTP email with HTML report
+├── email_sender.py      # SMTP email with HTML report (Gmail + Outlook, auto-detected)
 ├── compare.py           # Python vs Claude result comparison
 ├── requirements.txt
 ├── .env.example         # Credential template
