@@ -57,12 +57,12 @@ def scrape_nasdaq_splits(target_date: datetime.date) -> set[str]:
             data.get('data', {}).get('upcomingSplits', {}).get('rows') or
             []
         )
+        date_fmt_slash = target_date.strftime('%m/%d/%Y')
         for row in rows:
-            sym = (row.get('symbol') or row.get('ticker') or '').strip().upper()
-            ex = row.get('executionDate') or row.get('exDate') or ''
-            if sym and target_date.strftime('%m/%d/%Y') in ex or date_str in ex:
-                tickers.add(sym)
-            elif sym and not ex:
+            sym    = (row.get('symbol') or row.get('ticker') or '').strip().upper()
+            exdate = row.get('executionDate') or row.get('exDate') or ''
+            # Only add if executionDate matches target — API returns upcoming splits, not just target date
+            if sym and (date_fmt_slash in exdate or date_str in exdate):
                 tickers.add(sym)
     except Exception as e:
         logger.warning(f"NASDAQ splits API error: {e}")
@@ -172,9 +172,9 @@ def scrape_nasdaq_dividends(target_date: datetime.date) -> dict[str, dict]:
         rows = data.get('data', {}).get('calendar', {}).get('rows') or []
         for row in rows:
             sym = (row.get('symbol') or '').strip().upper()
-            ex  = row.get('exOrEffDate') or row.get('exDate') or ''
             amt = row.get('amount') or row.get('dividend') or ''
-            if sym and (date_str in ex or target_date.strftime('%m/%d/%Y') in ex):
+            # API is queried by date — all returned rows are for target_date, ex-field is often empty
+            if sym:
                 results[sym] = {'amount': amt, 'source': 'NASDAQ'}
     except Exception as e:
         logger.warning(f"NASDAQ dividends API error: {e}")
@@ -185,7 +185,7 @@ def scrape_stockanalysis_dividends(target_date: datetime.date) -> dict[str, dict
     """StockAnalysis dividend calendar."""
     results: dict[str, dict] = {}
     date_str = target_date.strftime('%Y-%m-%d')
-    url = f'https://stockanalysis.com/dividends/calendar/?date={date_str}'
+    url = f'https://stockanalysis.com/dividends/?date={date_str}'
     resp = _get(url)
     if not resp:
         return results

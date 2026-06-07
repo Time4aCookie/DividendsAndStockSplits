@@ -18,14 +18,13 @@ import os
 import sys
 from pathlib import Path
 
-import pandas as pd
 from dotenv import load_dotenv
+load_dotenv()  # must run before email_sender is imported (it reads env vars at module level)
 
+import pandas as pd
 from ticker_utils import build_ticker_map, get_underlying
 from scrapers import get_all_splits, get_all_dividends
 from email_sender import send_report, build_html_body
-
-load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(message)s',
