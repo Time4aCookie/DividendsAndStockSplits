@@ -42,9 +42,9 @@ def _get(url: str, timeout: int = 15) -> requests.Response | None:
 # SPLITS
 # ---------------------------------------------------------------------------
 
-def scrape_nasdaq_splits(target_date: datetime.date) -> set[str]:
-    """NASDAQ market-activity splits calendar."""
-    tickers: set[str] = set()
+def scrape_nasdaq_splits(target_date: datetime.date) -> dict[str, str]:
+    """NASDAQ market-activity splits calendar. Returns {ticker: ratio_str}."""
+    found: dict[str, str] = {}
     date_str = target_date.strftime('%Y-%m-%d')
     url = 'https://api.nasdaq.com/api/calendar/splits'
     params = {'date': date_str}
@@ -61,80 +61,82 @@ def scrape_nasdaq_splits(target_date: datetime.date) -> set[str]:
         for row in rows:
             sym    = (row.get('symbol') or row.get('ticker') or '').strip().upper()
             exdate = row.get('executionDate') or row.get('exDate') or ''
+            ratio  = str(row.get('ratio') or '').strip()
             # Only add if executionDate matches target — API returns upcoming splits, not just target date
             if sym and (date_fmt_slash in exdate or date_str in exdate):
-                tickers.add(sym)
+                found[sym] = ratio
     except Exception as e:
         logger.warning(f"NASDAQ splits API error: {e}")
 
     # Fallback: scrape the HTML page
-    if not tickers:
+    if not found:
         resp = _get('https://www.nasdaq.com/market-activity/stock-splits')
         if resp:
             soup = BeautifulSoup(resp.text, 'html.parser')
             for row in soup.select('table tbody tr'):
                 cells = row.find_all('td')
                 if len(cells) >= 3:
-                    date_cell = cells[2].get_text(strip=True)
-                    sym_cell  = cells[0].get_text(strip=True).upper()
+                    date_cell  = cells[2].get_text(strip=True)
+                    sym_cell   = cells[0].get_text(strip=True).upper()
+                    ratio_cell = cells[1].get_text(strip=True) if len(cells) > 1 else ''
                     if target_date.strftime('%m/%d/%Y') in date_cell or date_str in date_cell:
-                        tickers.add(sym_cell)
+                        found[sym_cell] = ratio_cell
 
-    return tickers
+    return found
 
 
-def scrape_tipranks_splits(target_date: datetime.date) -> set[str]:
-    """TipRanks upcoming splits calendar (JSON endpoint)."""
-    tickers: set[str] = set()
-    # TipRanks exposes a JSON feed used by their calendar page
+def scrape_tipranks_splits(target_date: datetime.date) -> dict[str, str]:
+    """TipRanks upcoming splits calendar. Returns {ticker: ratio_str}."""
+    found: dict[str, str] = {}
     url = 'https://www.tipranks.com/api/calendar/stock-splits/'
     resp = _get(url)
     if not resp:
-        return tickers
+        return found
     try:
         data = resp.json()
         events = data if isinstance(data, list) else data.get('data', [])
         for ev in events:
             ex = ev.get('exDate') or ev.get('date') or ''
             sym = (ev.get('ticker') or ev.get('symbol') or '').strip().upper()
+            ratio = str(ev.get('ratio') or ev.get('splitRatio') or '').strip()
             try:
                 ev_date = datetime.date.fromisoformat(ex[:10])
             except Exception:
                 continue
             if ev_date == target_date and sym:
-                tickers.add(sym)
+                found[sym] = ratio
     except Exception as e:
         logger.warning(f"TipRanks splits parse error: {e}")
-    return tickers
+    return found
 
 
-def scrape_nasdaqtrader_splits(target_date: datetime.date) -> set[str]:
-    """NASDAQTrader splits file (updated daily)."""
-    tickers: set[str] = set()
-    # NASDAQTrader publishes a daily splits file
+def scrape_nasdaqtrader_splits(target_date: datetime.date) -> dict[str, str]:
+    """NASDAQTrader splits file (updated daily). Returns {ticker: ratio_str}."""
+    found: dict[str, str] = {}
     url = 'https://www.nasdaqtrader.com/dynamic/splits/splits.txt'
     resp = _get(url)
     if not resp:
-        return tickers
+        return found
     date_fmt_slash = target_date.strftime('%m/%d/%Y')
     date_fmt_dash  = target_date.strftime('%Y-%m-%d')
     for line in resp.text.splitlines():
         parts = [p.strip() for p in line.split('|')]
         if len(parts) < 3:
             continue
-        sym      = parts[0].upper()
-        ex_date  = parts[2] if len(parts) > 2 else ''
+        sym     = parts[0].upper()
+        ratio   = parts[1] if len(parts) > 1 else ''
+        ex_date = parts[2] if len(parts) > 2 else ''
         if date_fmt_slash in ex_date or date_fmt_dash in ex_date:
-            tickers.add(sym)
-    return tickers
+            found[sym] = ratio
+    return found
 
 
-def get_all_splits(target_date: datetime.date) -> dict[str, list[str]]:
+def get_all_splits(target_date: datetime.date) -> dict[str, dict]:
     """
     Aggregate splits from all sources.
-    Returns {ticker: [sources_that_confirmed_it]}.
+    Returns {ticker: {'ratio': str, 'sources': [str, ...]}}.
     """
-    results: dict[str, list[str]] = {}
+    results: dict[str, dict] = {}
 
     sources = [
         ('NASDAQ',       scrape_nasdaq_splits),
@@ -146,8 +148,12 @@ def get_all_splits(target_date: datetime.date) -> dict[str, list[str]]:
         try:
             found = fn(target_date)
             logger.info(f"{name} splits: {len(found)} tickers")
-            for sym in found:
-                results.setdefault(sym, []).append(name)
+            for sym, ratio in found.items():
+                if sym not in results:
+                    results[sym] = {'ratio': ratio, 'sources': []}
+                elif ratio and not results[sym]['ratio']:
+                    results[sym]['ratio'] = ratio
+                results[sym]['sources'].append(name)
         except Exception as e:
             logger.error(f"{name} splits failed: {e}")
         time.sleep(0.5)
@@ -172,7 +178,9 @@ def scrape_nasdaq_dividends(target_date: datetime.date) -> dict[str, dict]:
         rows = data.get('data', {}).get('calendar', {}).get('rows') or []
         for row in rows:
             sym = (row.get('symbol') or '').strip().upper()
-            amt = row.get('amount') or row.get('dividend') or ''
+            # NASDAQ API uses 'dividend_Rate' (e.g. 0.22), not 'amount' or 'dividend'
+            raw = row.get('dividend_Rate') or row.get('amount') or row.get('dividend') or ''
+            amt = ('$' + f'{float(raw):.4f}'.rstrip('0').rstrip('.')) if raw != '' else ''
             # API is queried by date — all returned rows are for target_date, ex-field is often empty
             if sym:
                 results[sym] = {'amount': amt, 'source': 'NASDAQ'}
