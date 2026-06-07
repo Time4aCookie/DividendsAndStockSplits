@@ -1,14 +1,20 @@
 """
 Utilities for parsing equity tickers and extracting underlying symbols.
 
-Handles: warrants, rights, preferred stock, options (OCC format),
-         multiple share classes, units, and other derivative instruments.
+Handles: warrants, rights, preferred stock, options (OCC format and
+human-readable format), multiple share classes, units, and other
+derivative instruments.
 """
 
 import re
 
 # OCC option format: TICKER + YYMMDD + C/P + STRIKE (e.g. AAPL240119C00150000)
 OCC_OPTION_RE = re.compile(r'^([A-Z]{1,6})\d{6}[CP]\d+$')
+
+# Human-readable option format: "AVGO JUN 05 2026 310.00 PUT"
+# Detection: contains a space, a month abbreviation, and ends with CALL or PUT
+MONTH_ABBREVS = {'JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'}
+HUMAN_OPTION_RE = re.compile(r'^([A-Z]{1,6})\s+\w+\s+\d{2}\s+\d{4}\s+[\d.]+\s+(CALL|PUT)$')
 
 # Suffixes that indicate a non-common-stock instrument and what to strip
 WARRANT_SUFFIXES = ['.WS', '.WT', '.W', 'W']          # e.g. ACMRW, ACMR.WS
@@ -37,7 +43,12 @@ def get_underlying(ticker: str) -> tuple[str, str]:
 
     t = ticker.strip().upper()
 
-    # OCC option format
+    # Human-readable option format: "AVGO JUN 05 2026 310.00 PUT"
+    m = HUMAN_OPTION_RE.match(t)
+    if m:
+        return m.group(1), 'option'
+
+    # OCC option format: AAPL240119C00150000
     m = OCC_OPTION_RE.match(t)
     if m:
         return m.group(1), 'option'
