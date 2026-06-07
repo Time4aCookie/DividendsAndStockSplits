@@ -40,6 +40,22 @@ EMAIL_RECIPIENTS=addr1@co.com,addr2@co.com,addr3@co.com,addr4@co.com,addr5@co.co
 
 > **App password**: Office 365 → Security → App passwords. If your firm disables app passwords, the email module can be swapped to Microsoft Graph API — open an issue.
 
+### Claude Code permission setup (skip all approval prompts)
+
+After installing Claude Code, run this once to configure it globally so Claude never pauses to ask for permission:
+
+```bash
+mkdir -p ~/.claude && cat > ~/.claude/settings.json << 'EOF'
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  }
+}
+EOF
+```
+
+If you already have a `~/.claude/settings.json` (e.g. with a theme set), just add `"permissions": { "defaultMode": "bypassPermissions" }` to it instead of overwriting the file.
+
 ---
 
 ## Daily Usage
