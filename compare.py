@@ -85,12 +85,12 @@ def compare(
 
 def print_comparison(discrepancies: list[str], agreements: list[str]) -> None:
     if agreements:
-        print("\n✓ AGREED:")
+        print("\n[OK] AGREED:")
         for a in agreements:
             print(f"  {a}")
     if discrepancies:
-        print("\n⚠ DISCREPANCIES (MANUAL VERIFICATION REQUIRED):")
+        print("\n[!!] DISCREPANCIES (MANUAL VERIFICATION REQUIRED):")
         for d in discrepancies:
             print(f"  {d}")
     if not discrepancies:
-        print("\n✓ Python and Claude agree on all findings.")
+        print("\n[OK] Python and Claude agree on all findings.")

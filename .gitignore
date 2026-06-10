@@ -18,5 +18,8 @@ output/
 # Claude Code session memory (machine-local)
 memory/
 
+# Claude Code machine-local permission grants
+.claude/settings.local.json
+
 # macOS
 .DS_Store

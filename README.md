@@ -6,12 +6,12 @@ Daily automation for equity traders. After market close, checks all positions (a
 
 ## How It Works
 
-1. **Python script** scrapes 3 split sources and 4 dividend sources, filters to your positions, writes a CSV + JSON.
-2. **Claude** independently checks the same sources and writes its own findings.
+1. **Python script** scrapes 3 split calendars and checks dividends **per-ticker** (every position individually — bulk dividend calendars miss ADRs and CEFs), filters to your positions, writes a CSV + JSON. Takes ~15–20 minutes for ~1000 tickers due to rate-limit pacing. Any ticker it fails to verify is reported as UNCHECKED rather than silently skipped.
+2. **Claude** independently verifies: re-reads the split calendars, confirms every split against the company's own press release, cross-checks dividends against a second calendar, and confirms every dividend hit on the ticker's own page.
 3. Both results are compared — discrepancies are highlighted in the email and console.
-4. A formatted HTML email with the attached CSV is sent to 5 recipients.
+4. A formatted HTML email with the attached CSV is sent to 5 recipients — **always**, even when nothing was found (a "no events" email confirms the check ran).
 
-Instruments handled: common stocks, warrants, rights, preferred stock, options (OCC format and human-readable format like `AMPG Oct 16 2026 7.50 CALL`), and multiple share classes. All non-common instruments are mapped to their underlying ticker before checking.
+Instruments handled: common stocks, warrants, rights, preferred stock, options (OCC format and human-readable formats like `AMPG Oct 16 2026 7.50 CALL` or `XRX JAN 21 '28 7 CALL`), and multiple share classes. All non-common instruments are mapped to their underlying ticker before checking. Ambiguous bare suffixes (`GLW` could be Corning or a GL warrant) are checked under **both** interpretations so neither can be missed.
 
 ---
 
@@ -104,30 +104,31 @@ Format TBD — will be added once the broker export format is confirmed.
 | `output/python_results_YYYY-MM-DD.csv` | Python findings (attached to email) |
 | `output/python_results_YYYY-MM-DD.json` | Python findings in JSON (for Claude comparison) |
 | `output/claude_results_YYYY-MM-DD.json` | Claude's findings (written after its independent check) |
+| `output/unchecked_tickers_YYYY-MM-DD.txt` | Tickers that could not be verified (rate limit/errors) — only written when non-empty; its presence means the report is incomplete |
 
 The `output/` directory and all Excel files are gitignored.
 
 ---
 
-## Data Sources
+## Data Sources (as of 2026-06-10)
 
-### Splits
-| Source | Status | Notes |
-|---|---|---|
-| NASDAQ API (`api.nasdaq.com/api/calendar/splits`) | ✓ Working | Primary — filter by `executionDate` |
-| NASDAQ HTML (`nasdaq.com/market-activity/stock-splits`) | ✓ Working | Fallback |
-| NASDAQTrader (`nasdaqtrader.com/dynamic/splits/splits.txt`) | ✓ Working | Pipe-delimited daily file |
-| StockAnalysis (`stockanalysis.com/actions/splits/`) | ✓ Working | Cross-reference |
-| TipRanks splits page (`tipranks.com/calendars/stock-splits/upcoming`) | ⚠ API returns 403 | Use HTML page instead of API |
+### Splits — 3 independent calendars
+| Source | Notes |
+|---|---|
+| StockAnalysis (`stockanalysis.com/actions/splits/`) | Data in SvelteKit inline script. Missed VRNO on 2026-06-11 — never used alone |
+| Benzinga (`benzinga.com/calendars/stock-splits`) | Server-rendered table, explicit Ex-Date per row; covers OTC and BATS ETFs |
+| Investing.com (`investing.com/stock-split-calendar/`) | Date-grouped table |
 
-### Dividends
-| Source | Status | Notes |
-|---|---|---|
-| NASDAQ API (`api.nasdaq.com/api/calendar/dividends`) | ✓ Working | Primary — all rows returned are for the queried date |
-| MarketBeat (`marketbeat.com/dividends/ex-dividend-date/`) | ✓ Working | Cross-reference |
-| EarningsWhispers (`earningswhispers.com/dividend/`) | ⚠ Inconsistent | Use if available |
-| Finviz (`finviz.com/calendar.ashx`) | ⚠ JS-rendered | May not return data without a browser |
-| StockAnalysis dividends | ✗ Unreliable | URL returns 404 — skipped automatically |
+Claude additionally verifies every split hit against the company's own press release (`stocktitan.net/news/TICKER/`) — the only check independent of all calendars.
+
+### Dividends — per-ticker primary + calendar cross-check
+| Source | Notes |
+|---|---|
+| StockAnalysis per-ticker (`stockanalysis.com/stocks/TICKER/dividend/`) | Primary — only source covering US equities, ADRs (BABA), and CEFs (RA). Rate-limited: the script paces at 0.8s/request with 120s backoff on 429. Run at most once daily |
+| MarketBeat (`marketbeat.com/dividends/ex-dividend-date/`) | Supplementary calendar — US equities only; missed BABA and RA on 2026-06-11 |
+
+### Dead sources — removed, do not re-add without re-testing
+NASDAQ API (timeout), NASDAQ splits HTML (JS-rendered, no data in raw HTML), NASDAQTrader splits.txt (404), TipRanks (403), StockAnalysis dividends calendar (404), EarningsWhispers (error page), Yahoo Finance batch API (401), Finviz / WSJ / Barchart / Seeking Alpha / dividend.com (blocked or no coverage).
 
 ---
 
@@ -155,5 +156,6 @@ DividendsAndStockSplits/
 | Both agree | High confidence | Proceed, still confirm if large position |
 | Claude only | Python scraper likely missed it | **Verify manually** |
 | Python only | Claude may have missed a source | **Verify manually** |
+| INCOMPLETE CHECK warning | Some tickers were never verified (rate limit/errors) | **Re-run or verify the unchecked list** — the report cannot be trusted as complete |
 
 Claude is generally more reliable on edge cases but both can miss things. The dual-check exists precisely because neither source is infallible and real money is on the line.

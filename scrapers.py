@@ -2,11 +2,21 @@
 Web scrapers for stock splits and dividend ex-dates.
 
 Sources:
-  Splits  : NASDAQ splits calendar, TipRanks splits, NASDAQTrader
-  Dividends: NASDAQ dividend calendar, StockAnalysis, MarketBeat, Finviz
+  Splits  : StockAnalysis calendar, Benzinga calendar, Investing.com calendar
+  Dividends: StockAnalysis per-ticker (primary), MarketBeat calendar (supplementary)
+
+Removed sources (broken as of 2026-06-10):
+  NASDAQ API          — consistent timeouts
+  NASDAQ splits HTML  — JS-rendered; raw HTML contains no data rows
+  TipRanks API/HTML   — 403 Forbidden
+  NASDAQTrader txt    — 404
+  StockAnalysis dividends calendar (/actions/dividends/) — 404
+  EarningsWhispers    — error page
+  Yahoo batch quote API — 401 (now requires auth)
 """
 
 import datetime
+import json as json_lib
 import re
 import time
 import logging
@@ -17,15 +27,38 @@ logger = logging.getLogger(__name__)
 
 HEADERS = {
     'User-Agent': (
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
         'AppleWebKit/537.36 (KHTML, like Gecko) '
         'Chrome/124.0.0.0 Safari/537.36'
     ),
     'Accept-Language': 'en-US,en;q=0.9',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
 }
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+
+# Per-IP rate-limit backoff shared across threads.
+# When any thread gets a 429, it sets this to (now + retry_after).
+# All threads sleep until this time before making the next request.
+import threading as _threading
+_rate_lock        = _threading.Lock()
+_rate_limit_until = 0.0   # monotonic seconds; 0 = no active backoff
+
+
+def _wait_for_rate_limit() -> None:
+    """Sleep until any active rate-limit backoff expires."""
+    with _rate_lock:
+        until = _rate_limit_until
+    wait = until - time.monotonic()
+    if wait > 0:
+        time.sleep(wait + 0.05)   # +50ms buffer after the window expires
+
+
+def _set_rate_limit(retry_after_seconds: int) -> None:
+    global _rate_limit_until
+    with _rate_lock:
+        _rate_limit_until = max(_rate_limit_until, time.monotonic() + retry_after_seconds)
 
 
 def _get(url: str, timeout: int = 15) -> requests.Response | None:
@@ -38,96 +71,205 @@ def _get(url: str, timeout: int = 15) -> requests.Response | None:
         return None
 
 
+def _get_perticker(url: str, timeout: int = 12) -> tuple[str, requests.Response | None]:
+    """
+    GET for per-ticker requests. Obeys shared rate-limit backoff and retries
+    once after a 429. Does NOT log 404s (most tickers simply won't have pages).
+
+    Returns (status, response):
+      ('ok', resp)       — page fetched successfully
+      ('notfound', None) — 404: the ticker has no page here (a real answer)
+      ('error', None)    — timeout / 429 after retries / 5xx: we DON'T know.
+                           Caller must treat the ticker as UNCHECKED, never as
+                           "no event" — that distinction is what keeps rate
+                           limiting from silently producing an empty report.
+    """
+    _wait_for_rate_limit()
+    for attempt in range(2):
+        try:
+            resp = SESSION.get(url, timeout=timeout)
+            if resp.status_code == 429:
+                retry_after = max(int(resp.headers.get('Retry-After', 120)), 120)
+                _set_rate_limit(retry_after)
+                logger.warning(f"Rate limited — backing off {retry_after}s (attempt {attempt + 1})")
+                time.sleep(retry_after + 0.5)
+                continue   # retry
+            if resp.status_code == 404:
+                return 'notfound', None
+            resp.raise_for_status()
+            return 'ok', resp
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code if e.response is not None else 0
+            if code == 429:
+                retry_after = max(int(e.response.headers.get('Retry-After', 120)), 120)
+                _set_rate_limit(retry_after)
+                logger.warning(f"Rate limited — backing off {retry_after}s (attempt {attempt + 1})")
+                time.sleep(retry_after + 0.5)
+                continue
+            if code == 404:
+                return 'notfound', None
+            logger.warning(f"GET {url} failed: {e}")
+            return 'error', None
+        except Exception as e:
+            logger.warning(f"GET {url} failed: {e}")
+            return 'error', None
+    return 'error', None   # exhausted retries (persistent 429)
+
+
+def _date_variants(d: datetime.date) -> set[str]:
+    """All common string representations of a date for loose matching."""
+    return {
+        d.isoformat(),                                       # 2026-06-11
+        d.strftime('%m/%d/%Y'),                              # 06/11/2026
+        d.strftime('%m/%d/%y'),                              # 06/11/26
+        d.strftime('%b %d, %Y'),                             # Jun 11, 2026 (zero-padded)
+        d.strftime('%B %d, %Y'),                             # June 11, 2026 (zero-padded)
+        f"{d.strftime('%b')} {d.day}, {d.year}",             # Jun 11, 2026 (no leading zero)
+        f"{d.strftime('%B')} {d.day}, {d.year}",             # June 11, 2026 (no leading zero)
+    }
+
+
+def _get_sveltekit_script(html: str) -> str | None:
+    """Return the SvelteKit inline data script, or None if not found."""
+    for sc in re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL):
+        if '__sveltekit' in sc:
+            return sc
+    return None
+
+
 # ---------------------------------------------------------------------------
 # SPLITS
 # ---------------------------------------------------------------------------
 
-def scrape_nasdaq_splits(target_date: datetime.date) -> dict[str, str]:
-    """NASDAQ market-activity splits calendar. Returns {ticker: ratio_str}."""
-    found: dict[str, str] = {}
-    date_str = target_date.strftime('%Y-%m-%d')
-    url = 'https://api.nasdaq.com/api/calendar/splits'
-    params = {'date': date_str}
-    try:
-        resp = SESSION.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        rows = (
-            data.get('data', {}).get('rows') or
-            data.get('data', {}).get('upcomingSplits', {}).get('rows') or
-            []
-        )
-        date_fmt_slash = target_date.strftime('%m/%d/%Y')
-        for row in rows:
-            sym    = (row.get('symbol') or row.get('ticker') or '').strip().upper()
-            exdate = row.get('executionDate') or row.get('exDate') or ''
-            ratio  = str(row.get('ratio') or '').strip()
-            # Only add if executionDate matches target — API returns upcoming splits, not just target date
-            if sym and (date_fmt_slash in exdate or date_str in exdate):
-                found[sym] = ratio
-    except Exception as e:
-        logger.warning(f"NASDAQ splits API error: {e}")
+# StockAnalysis splits page SvelteKit format (as of 2026-06):
+#   data:[{date:"Jun 11, 2026",symbol:"$SHPH",name:"...",splitType:"...",splitRatio:"1 for 10"}, ...]
+# Keys are unquoted JS object literals, symbol has a "$" prefix.
+_SA_SPLITS_ROW_RE = re.compile(
+    r'\{date:"(?P<date>[^"]+)"'
+    r',symbol:"(?P<symbol>[^"]+)"'
+    r',name:"[^"]*"'
+    r',splitType:"[^"]*"'
+    r',splitRatio:"(?P<ratio>[^"]*)"\}'
+)
 
-    # Fallback: scrape the HTML page
+
+def scrape_stockanalysis_splits(target_date: datetime.date) -> dict[str, str]:
+    """StockAnalysis upcoming splits calendar. Returns {ticker: ratio_str}."""
+    found: dict[str, str] = {}
+    resp = _get('https://stockanalysis.com/actions/splits/')
+    if not resp:
+        return found
+
+    date_variants = _date_variants(target_date)
+
+    # Primary: parse SvelteKit inline JS object literal
+    svelte = _get_sveltekit_script(resp.text)
+    if svelte:
+        for m in _SA_SPLITS_ROW_RE.finditer(svelte):
+            date_str = m.group('date')
+            sym_raw  = m.group('symbol')
+            ratio    = m.group('ratio')
+            if any(v in date_str for v in date_variants):
+                # Strip "$" prefix and any HTML tags (symbol field has html:true)
+                sym = re.sub(r'<[^>]+>', '', sym_raw).lstrip('$').strip().upper()
+                if sym:
+                    found[sym] = ratio
+
+    # Fallback: HTML table (in case page structure changes)
+    # SA splits table columns: Date | Symbol | Company | Type | Ratio
     if not found:
-        resp = _get('https://www.nasdaq.com/market-activity/stock-splits')
-        if resp:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for row in soup.select('table tbody tr'):
-                cells = row.find_all('td')
-                if len(cells) >= 3:
-                    date_cell  = cells[2].get_text(strip=True)
-                    sym_cell   = cells[0].get_text(strip=True).upper()
-                    ratio_cell = cells[1].get_text(strip=True) if len(cells) > 1 else ''
-                    if target_date.strftime('%m/%d/%Y') in date_cell or date_str in date_cell:
-                        found[sym_cell] = ratio_cell
-
-    return found
-
-
-def scrape_tipranks_splits(target_date: datetime.date) -> dict[str, str]:
-    """TipRanks upcoming splits calendar. Returns {ticker: ratio_str}."""
-    found: dict[str, str] = {}
-    url = 'https://www.tipranks.com/api/calendar/stock-splits/'
-    resp = _get(url)
-    if not resp:
-        return found
-    try:
-        data = resp.json()
-        events = data if isinstance(data, list) else data.get('data', [])
-        for ev in events:
-            ex = ev.get('exDate') or ev.get('date') or ''
-            sym = (ev.get('ticker') or ev.get('symbol') or '').strip().upper()
-            ratio = str(ev.get('ratio') or ev.get('splitRatio') or '').strip()
-            try:
-                ev_date = datetime.date.fromisoformat(ex[:10])
-            except Exception:
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        for row in soup.select('table tbody tr'):
+            cells = row.find_all('td')
+            if len(cells) < 2:
                 continue
-            if ev_date == target_date and sym:
-                found[sym] = ratio
-    except Exception as e:
-        logger.warning(f"TipRanks splits parse error: {e}")
+            date_text = cells[0].get_text(strip=True)
+            if any(v in date_text for v in date_variants):
+                sym   = cells[1].get_text(strip=True).lstrip('$').upper()
+                ratio = cells[-1].get_text(strip=True)
+                if sym and re.match(r'^[A-Z.]{1,10}$', sym):
+                    found[sym] = ratio
+
     return found
 
 
-def scrape_nasdaqtrader_splits(target_date: datetime.date) -> dict[str, str]:
-    """NASDAQTrader splits file (updated daily). Returns {ticker: ratio_str}."""
+def scrape_benzinga_splits(target_date: datetime.date) -> dict[str, str]:
+    """
+    Benzinga stock-splits calendar. Server-rendered table with explicit
+    Ex-Date on every row. Covers NASDAQ, NYSE, AMEX, OTC, and BATS ETFs.
+    Returns {ticker: ratio_str}.
+    """
     found: dict[str, str] = {}
-    url = 'https://www.nasdaqtrader.com/dynamic/splits/splits.txt'
-    resp = _get(url)
+    resp = _get('https://www.benzinga.com/calendars/stock-splits')
     if not resp:
         return found
-    date_fmt_slash = target_date.strftime('%m/%d/%Y')
-    date_fmt_dash  = target_date.strftime('%Y-%m-%d')
-    for line in resp.text.splitlines():
-        parts = [p.strip() for p in line.split('|')]
-        if len(parts) < 3:
+
+    date_mdY = target_date.strftime('%m/%d/%Y')   # Benzinga format: 06/11/2026
+    soup = BeautifulSoup(resp.text, 'html.parser')
+
+    for table in soup.find_all('table'):
+        # Map column names to indexes from the header (strip sort arrows)
+        headers = [th.get_text(strip=True).replace('▲', '').replace('▼', '').strip().lower()
+                   for th in table.find_all('th')]
+        try:
+            i_date   = next(i for i, h in enumerate(headers) if 'ex-date' in h or 'ex date' in h)
+            i_ticker = next(i for i, h in enumerate(headers) if 'ticker' in h or 'symbol' in h)
+            i_ratio  = next(i for i, h in enumerate(headers) if 'ratio' in h)
+        except StopIteration:
+            continue   # not the splits table
+
+        for row in table.find_all('tr'):
+            cells = row.find_all('td')
+            if len(cells) <= max(i_date, i_ticker, i_ratio):
+                continue
+            if cells[i_date].get_text(strip=True) == date_mdY:
+                sym   = cells[i_ticker].get_text(strip=True).upper()
+                ratio = cells[i_ratio].get_text(strip=True)
+                if sym and re.match(r'^[A-Z0-9.]{1,10}$', sym):
+                    found[sym] = ratio
+        break   # first matching table only
+
+    return found
+
+
+# Investing.com company cell looks like: "Global Mofy Metaverse ( GMM )"
+_INVESTING_TICKER_RE = re.compile(r'\(\s*([A-Z0-9.]{1,10})\s*\)')
+
+
+def scrape_investing_splits(target_date: datetime.date) -> dict[str, str]:
+    """
+    Investing.com stock-split calendar. Date-grouped table: the date cell is
+    filled only on the FIRST row of each date group, so we carry it forward.
+    Returns {ticker: ratio_str}.
+    """
+    found: dict[str, str] = {}
+    resp = _get('https://www.investing.com/stock-split-calendar/')
+    if not resp:
+        return found
+
+    date_variants = _date_variants(target_date)
+    soup = BeautifulSoup(resp.text, 'html.parser')
+
+    for table in soup.find_all('table'):
+        headers = [th.get_text(strip=True).lower() for th in table.find_all('th')]
+        if not any('split' in h for h in headers):
             continue
-        sym     = parts[0].upper()
-        ratio   = parts[1] if len(parts) > 1 else ''
-        ex_date = parts[2] if len(parts) > 2 else ''
-        if date_fmt_slash in ex_date or date_fmt_dash in ex_date:
-            found[sym] = ratio
+
+        current_date = ''
+        for row in table.find_all('tr'):
+            cells = row.find_all('td')
+            if len(cells) < 3:
+                continue
+            date_text = cells[0].get_text(strip=True)
+            if date_text:
+                current_date = date_text   # new date group starts
+            if not any(v in current_date for v in date_variants):
+                continue
+            m = _INVESTING_TICKER_RE.search(cells[1].get_text(' ', strip=True))
+            if m:
+                found[m.group(1)] = cells[2].get_text(strip=True)
+        break
+
     return found
 
 
@@ -137,13 +279,11 @@ def get_all_splits(target_date: datetime.date) -> dict[str, dict]:
     Returns {ticker: {'ratio': str, 'sources': [str, ...]}}.
     """
     results: dict[str, dict] = {}
-
     sources = [
-        ('NASDAQ',       scrape_nasdaq_splits),
-        ('TipRanks',     scrape_tipranks_splits),
-        ('NASDAQTrader', scrape_nasdaqtrader_splits),
+        ('StockAnalysis', scrape_stockanalysis_splits),
+        ('Benzinga',      scrape_benzinga_splits),
+        ('Investing.com', scrape_investing_splits),
     ]
-
     for name, fn in sources:
         try:
             found = fn(target_date)
@@ -157,61 +297,202 @@ def get_all_splits(target_date: datetime.date) -> dict[str, dict]:
         except Exception as e:
             logger.error(f"{name} splits failed: {e}")
         time.sleep(0.5)
-
     return results
 
 
 # ---------------------------------------------------------------------------
-# DIVIDENDS
+# DIVIDENDS — per-ticker StockAnalysis parsing
 # ---------------------------------------------------------------------------
 
-def scrape_nasdaq_dividends(target_date: datetime.date) -> dict[str, dict]:
-    """NASDAQ dividend calendar API for ex-dividend dates."""
-    results: dict[str, dict] = {}
-    date_str = target_date.strftime('%Y-%m-%d')
-    url = 'https://api.nasdaq.com/api/calendar/dividends'
-    params = {'date': date_str}
-    try:
-        resp = SESSION.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        rows = data.get('data', {}).get('calendar', {}).get('rows') or []
-        for row in rows:
-            sym = (row.get('symbol') or '').strip().upper()
-            # NASDAQ API uses 'dividend_Rate' (e.g. 0.22), not 'amount' or 'dividend'
-            raw = row.get('dividend_Rate') or row.get('amount') or row.get('dividend') or ''
-            amt = ('$' + f'{float(raw):.4f}'.rstrip('0').rstrip('.')) if raw != '' else ''
-            # API is queried by date — all returned rows are for target_date, ex-field is often empty
-            if sym:
-                results[sym] = {'amount': amt, 'source': 'NASDAQ'}
-    except Exception as e:
-        logger.warning(f"NASDAQ dividends API error: {e}")
-    return results
+# StockAnalysis per-ticker dividend page SvelteKit format (as of 2026-06):
+#   history:[{dt:"2026-06-11",amt:"$1.030",dec:"n/a",record:"2026-06-11",pay:"2026-07-13"}, ...]
+_SA_DIV_HIST_RE = re.compile(r'\{dt:"(?P<dt>[^"]+)",amt:"(?P<amt>[^"]+)"')
 
 
-def scrape_stockanalysis_dividends(target_date: datetime.date) -> dict[str, dict]:
-    """StockAnalysis dividend calendar."""
-    results: dict[str, dict] = {}
-    date_str = target_date.strftime('%Y-%m-%d')
-    url = f'https://stockanalysis.com/dividends/?date={date_str}'
-    resp = _get(url)
-    if not resp:
-        return results
-    soup = BeautifulSoup(resp.text, 'html.parser')
+def _parse_sa_dividend_page(html: str, target_date: datetime.date) -> dict | None:
+    """
+    Parse a StockAnalysis /dividend/ page for target_date.
+    Returns {'amount': '$X.XX', 'source': 'StockAnalysis'} on match, else None.
+
+    Strategies (in order):
+      1. SvelteKit history array (dt/amt keys) — current format as of 2026-06
+      2. __NEXT_DATA__ JSON — legacy format
+      3. HTML table scan — universal fallback
+    """
+    date_variants = _date_variants(target_date)
+
+    # Strategy 1: SvelteKit history array
+    svelte = _get_sveltekit_script(html)
+    if svelte:
+        for m in _SA_DIV_HIST_RE.finditer(svelte):
+            dt  = m.group('dt')
+            amt = m.group('amt')
+            if any(v in dt for v in date_variants):
+                return {
+                    'amount': amt if amt.startswith('$') else f'${amt}',
+                    'source': 'StockAnalysis',
+                }
+
+    # Strategy 2: __NEXT_DATA__ JSON (legacy)
+    nd = re.search(r'id="__NEXT_DATA__"[^>]*>(.+?)</script>', html, re.DOTALL)
+    if nd:
+        try:
+            data   = json_lib.loads(nd.group(1))
+            amount = _search_dividend_in_json(data, date_variants)
+            if amount is not None:
+                amt_str = f'${amount}' if amount and not str(amount).startswith('$') else str(amount)
+                return {'amount': amt_str, 'source': 'StockAnalysis'}
+        except Exception:
+            pass
+
+    # Strategy 3: HTML table scan
+    # SA dividend history columns: Ex-Dividend Date | Cash Amount | Record Date | Pay Date.
+    # Match the ex-date column ONLY — matching the whole row would false-hit
+    # rows whose record/pay date equals the target.
+    soup = BeautifulSoup(html, 'html.parser')
     for row in soup.select('table tbody tr'):
         cells = row.find_all('td')
-        if len(cells) < 3:
+        if not cells:
             continue
-        sym = cells[0].get_text(strip=True).upper()
-        ex  = cells[2].get_text(strip=True)   # ex-date column
-        amt = cells[3].get_text(strip=True) if len(cells) > 3 else ''
-        if date_str in ex or target_date.strftime('%m/%d/%Y') in ex:
-            results[sym] = {'amount': amt, 'source': 'StockAnalysis'}
-    return results
+        ex_text = cells[0].get_text(strip=True)
+        if any(v in ex_text for v in date_variants):
+            for cell in cells[1:]:
+                text = cell.get_text(strip=True)
+                # Match amounts like $1.030, 1.03, $0.118
+                if re.match(r'^\$?[\d]+\.[\d]+$', text):
+                    return {'amount': f'${text.lstrip("$")}', 'source': 'StockAnalysis'}
+            # Date matched but couldn't parse amount — still a hit
+            return {'amount': '', 'source': 'StockAnalysis'}
 
+    return None
+
+
+def _search_dividend_in_json(obj, date_variants: set, depth: int = 0) -> str | None:
+    """
+    Recursively search a JSON structure for a dividend record whose ex-date
+    matches any of date_variants.
+    Returns the amount string if found, '' if date matched but no amount, None if not found.
+    """
+    if depth > 12:
+        return None
+    if isinstance(obj, dict):
+        DATE_KEYS = ('exDate', 'ex_date', 'date', 'exDividendDate', 'ex')
+        AMT_KEYS  = ('amount', 'cash', 'dividend', 'dividendAmount', 'cashAmount', 'adjDividend')
+        for dk in DATE_KEYS:
+            if dk in obj:
+                if any(v in str(obj[dk]) for v in date_variants):
+                    for ak in AMT_KEYS:
+                        if obj.get(ak) not in (None, '', 0):
+                            return str(obj[ak])
+                    return ''
+        for v in obj.values():
+            result = _search_dividend_in_json(v, date_variants, depth + 1)
+            if result is not None:
+                return result
+    elif isinstance(obj, list):
+        for item in obj:
+            result = _search_dividend_in_json(item, date_variants, depth + 1)
+            if result is not None:
+                return result
+    return None
+
+
+def _is_checkable_ticker(t: str) -> bool:
+    """
+    Return True if ticker looks like a real equity worth checking on StockAnalysis.
+    Filters out CUSIPs (start with digit), unextracted options (contain spaces),
+    and strings too long to be a valid ticker.
+    """
+    if not t or ' ' in t:
+        return False
+    if t[0].isdigit():       # CUSIPs and numeric IDs
+        return False
+    if len(t) > 8:           # no real equity ticker is this long
+        return False
+    return True
+
+
+def _fetch_sa_dividend(ticker: str, target_date: datetime.date) -> tuple[str, dict | None, bool]:
+    """
+    Fetch StockAnalysis per-ticker dividend page.
+    Tries /stocks/TICKER/ first; if that 404s, tries /etf/TICKER/.
+
+    Returns (ticker, result, checked):
+      result  — {'amount', 'source'} if the ticker has an ex-date on target_date, else None
+      checked — True if we got a definitive answer (page parsed, or 404 on both
+                paths). False if any request errored — the ticker is UNCHECKED
+                and must be reported as such, never treated as "no event".
+    """
+    time.sleep(0.8)   # 0.8s pacing keeps us well under StockAnalysis rate limits
+    any_error = False
+    for path_prefix in ('stocks', 'etf'):
+        url = f'https://stockanalysis.com/{path_prefix}/{ticker.lower()}/dividend/'
+        status, resp = _get_perticker(url)
+        if status == 'ok':
+            # Page loaded — definitive answer; don't try the other prefix
+            return ticker, _parse_sa_dividend_page(resp.text, target_date), True
+        if status == 'error':
+            any_error = True
+        # 'notfound' — try the other prefix
+    return ticker, None, not any_error
+
+
+def scrape_stockanalysis_dividends_perticker(
+    target_date: datetime.date,
+    tickers: list[str],
+) -> tuple[dict[str, dict], list[str]]:
+    """
+    Check every supplied underlying ticker on StockAnalysis for a dividend
+    ex-date matching target_date. Sequential with 0.8s pacing to stay under
+    rate limits (~14 min for ~1000 tickers).
+
+    Returns (results, unchecked):
+      results   — {ticker: {'amount': str, 'source': 'StockAnalysis'}}
+      unchecked — tickers we could NOT verify (rate limit / errors).
+                  These must be surfaced to the user, never silently dropped.
+    """
+    results:   dict[str, dict] = {}
+    unchecked: list[str] = []
+
+    # Filter out junk before making any requests
+    valid = [t for t in tickers if _is_checkable_ticker(t)]
+    skipped = len(tickers) - len(valid)
+    if skipped:
+        logger.info(f"StockAnalysis per-ticker: skipping {skipped} non-equity tickers (CUSIPs, options, etc.)")
+    logger.info(f"StockAnalysis per-ticker: checking {len(valid)} tickers (~{len(valid) * 0.9 / 60:.0f} min)...")
+
+    for done, t in enumerate(sorted(valid), start=1):
+        ticker, result, checked = _fetch_sa_dividend(t, target_date)
+        if not checked:
+            unchecked.append(ticker)
+        elif result is not None:
+            results[ticker] = result
+            logger.info(f"  SA HIT: {ticker} — {result.get('amount', '?')}")
+        if done % 100 == 0:
+            logger.info(
+                f"  StockAnalysis progress: {done}/{len(valid)} checked, "
+                f"{len(results)} hits, {len(unchecked)} unchecked"
+            )
+
+    logger.info(
+        f"StockAnalysis per-ticker: {len(results)} hits from {len(valid)} tickers; "
+        f"{len(unchecked)} UNCHECKED"
+    )
+    if unchecked:
+        logger.warning(
+            f"{len(unchecked)} ticker(s) could not be verified (rate limit/errors) — "
+            f"results are INCOMPLETE: {', '.join(unchecked[:15])}"
+            + (' ...' if len(unchecked) > 15 else '')
+        )
+    return results, unchecked
+
+
+# ---------------------------------------------------------------------------
+# DIVIDENDS — MarketBeat calendar (supplementary)
+# ---------------------------------------------------------------------------
 
 def scrape_marketbeat_dividends(target_date: datetime.date) -> dict[str, dict]:
-    """MarketBeat dividend calendar."""
+    """MarketBeat dividend calendar — supplementary cross-check for US equities."""
     results: dict[str, dict] = {}
     date_str = target_date.strftime('%Y-%m-%d')
     url = f'https://www.marketbeat.com/dividends/ex-dividend-date/{date_str}/'
@@ -230,52 +511,56 @@ def scrape_marketbeat_dividends(target_date: datetime.date) -> dict[str, dict]:
     return results
 
 
-def scrape_earningswhispers_dividends(target_date: datetime.date) -> dict[str, dict]:
-    """EarningsWhispers dividend calendar."""
-    results: dict[str, dict] = {}
-    date_str = target_date.strftime('%Y-%m-%d')
-    url = f'https://www.earningswhispers.com/dividend/{date_str}'
-    resp = _get(url)
-    if not resp:
-        return results
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    for row in soup.select('table tbody tr'):
-        cells = row.find_all('td')
-        if not cells:
-            continue
-        sym = cells[0].get_text(strip=True).upper()
-        amt = cells[1].get_text(strip=True) if len(cells) > 1 else ''
-        if sym and re.match(r'^[A-Z]{1,6}$', sym):
-            results[sym] = {'amount': amt, 'source': 'EarningsWhispers'}
-    return results
+# ---------------------------------------------------------------------------
+# DIVIDENDS — aggregator
+# ---------------------------------------------------------------------------
 
-
-def get_all_dividends(target_date: datetime.date) -> dict[str, dict]:
+def get_all_dividends(
+    target_date: datetime.date,
+    tickers: list[str] | None = None,
+) -> tuple[dict[str, dict], list[str]]:
     """
     Aggregate dividends from all sources.
-    Returns {ticker: {'amount': ..., 'sources': [...]}}.
+    tickers: underlying tickers from our positions — required for the per-ticker check.
+
+    Returns (merged, unchecked):
+      merged    — {ticker: {'amount': str, 'sources': [str, ...]}}
+      unchecked — tickers the per-ticker check could not verify (rate limit /
+                  errors). Caller MUST surface these; an empty result with a
+                  long unchecked list means the check failed, not "no events".
     """
-    merged: dict[str, dict] = {}
+    merged:    dict[str, dict] = {}
+    unchecked: list[str] = []
 
-    sources = [
-        ('NASDAQ',           scrape_nasdaq_dividends),
-        ('StockAnalysis',    scrape_stockanalysis_dividends),
-        ('MarketBeat',       scrape_marketbeat_dividends),
-        ('EarningsWhispers', scrape_earningswhispers_dividends),
-    ]
+    def _add(sym: str, amount: str, source: str) -> None:
+        if sym not in merged:
+            merged[sym] = {'amount': '', 'sources': []}
+        if source not in merged[sym]['sources']:
+            merged[sym]['sources'].append(source)
+        if not merged[sym]['amount'] and amount:
+            merged[sym]['amount'] = amount
 
-    for name, fn in sources:
+    # Primary: per-ticker StockAnalysis (covers ADRs, ETFs, and all US equities)
+    if tickers:
         try:
-            found = fn(target_date)
-            logger.info(f"{name} dividends: {len(found)} tickers")
-            for sym, info in found.items():
-                if sym not in merged:
-                    merged[sym] = {'amount': info.get('amount', ''), 'sources': []}
-                merged[sym]['sources'].append(name)
-                if not merged[sym]['amount'] and info.get('amount'):
-                    merged[sym]['amount'] = info['amount']
+            sa_results, unchecked = scrape_stockanalysis_dividends_perticker(target_date, tickers)
+            for sym, info in sa_results.items():
+                _add(sym, info.get('amount', ''), 'StockAnalysis')
         except Exception as e:
-            logger.error(f"{name} dividends failed: {e}")
-        time.sleep(0.5)
+            logger.error(f"StockAnalysis per-ticker failed: {e}")
+            unchecked = [t for t in tickers if _is_checkable_ticker(t)]   # nothing was verified
+    else:
+        logger.warning("No tickers supplied to get_all_dividends — per-ticker check skipped")
 
-    return merged
+    time.sleep(0.5)
+
+    # Supplementary: MarketBeat calendar (single request, good cross-check for US equities)
+    try:
+        mb = scrape_marketbeat_dividends(target_date)
+        logger.info(f"MarketBeat dividends: {len(mb)} tickers")
+        for sym, info in mb.items():
+            _add(sym, info.get('amount', ''), 'MarketBeat')
+    except Exception as e:
+        logger.error(f"MarketBeat dividends failed: {e}")
+
+    return merged, unchecked

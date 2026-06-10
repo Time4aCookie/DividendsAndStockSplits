@@ -64,39 +64,62 @@ python check_events.py <positions_file> --gtc <gtc_file> --no-email
 This produces:
 - `output/python_results_YYYY-MM-DD.csv`
 - `output/python_results_YYYY-MM-DD.json`
+- `output/unchecked_tickers_YYYY-MM-DD.txt` — only if some tickers could not be verified
+
+**Runtime & rate limits:** the dividend check hits StockAnalysis once per ticker at 0.8s
+pacing — expect **~15–20 minutes** for ~1000+ tickers, with progress logged every 100.
+Run it in the background. Do NOT run the script repeatedly in quick succession;
+StockAnalysis rate-limits (HTTP 429) and the script will stall in 120s backoff loops.
+Once per day is safe.
+
+**If the output reports UNCHECKED tickers**, the report is INCOMPLETE — some tickers
+could not be verified (rate limit/errors). This is automatically appended to the
+discrepancy list, which blocks the auto-send path. Re-run later or verify those
+tickers manually (list in `output/unchecked_tickers_YYYY-MM-DD.txt`). Never present
+a run with unchecked tickers as a clean "no events" day.
 
 ### Step 5 — Claude's independent check
-Independently fetch every source below. Do NOT skip any — cross-coverage is the whole
-point of the dual-check system.
+The Python script checks 1000+ tickers individually; Claude cannot re-fetch them all.
+Claude's check is targeted:
 
-**Critical API behavior notes:**
-- **NASDAQ dividends API**: All rows returned ARE for the queried date even if the
-  `exOrEffDate` field is empty. Do NOT filter by the ex-date field — trust all rows.
-- **NASDAQ splits API**: Returns upcoming splits across multiple dates. You MUST filter
-  by `executionDate` matching the target date — do not include splits with other dates.
-
-**Splits** (filter to executionDate = target date):
-- `https://api.nasdaq.com/api/calendar/splits?date=YYYY-MM-DD` (JSON — filter by executionDate)
-- `https://www.nasdaq.com/market-activity/stock-splits` (HTML — scan for target date)
-- `https://www.nasdaqtrader.com/dynamic/splits/splits.txt` (pipe-delimited — scan for target date)
-- `https://stockanalysis.com/actions/splits/` (upcoming splits section — scan for target date)
-- TipRanks API returns 403. Try HTML page instead: `https://www.tipranks.com/calendars/stock-splits/upcoming`
-
-**Dividends** (all rows from NASDAQ API are already for target date):
-- `https://api.nasdaq.com/api/calendar/dividends?date=YYYY-MM-DD` (JSON — trust all rows returned)
-- `https://www.marketbeat.com/dividends/ex-dividend-date/YYYY-MM-DD/` (HTML)
-- `https://www.earningswhispers.com/dividend/YYYY-MM-DD` (HTML)
-- `https://finviz.com/calendar.ashx` (HTML — dividends tab, filter by date)
-- StockAnalysis dividend calendar URL has been unreliable — skip if it errors.
+1. **Splits calendars (bulk)** — fetch all three, filter to target date, match against positions:
+   - `https://stockanalysis.com/actions/splits/` — missed VRNO on 2026-06-11; never rely on it alone
+   - `https://www.benzinga.com/calendars/stock-splits` — explicit Ex-Date column; covers OTC and BATS ETFs
+   - `https://www.investing.com/stock-split-calendar/` — date-grouped table; ticker in parens
+2. **Verify every split hit via press release** — splits are corporate actions the company
+   itself announces, which makes this the only check truly independent of all calendars.
+   For each split found (by the script or the calendars), fetch
+   `https://www.stocktitan.net/news/TICKER/` and confirm the company announced the split
+   with matching ratio and effective date. If StockTitan has nothing, WebSearch
+   `"<company> reverse stock split <date>"` for the press release. A split hit with no
+   findable announcement is a discrepancy — flag it.
+3. **MarketBeat dividend calendar (bulk)** — match against positions
+   (US equities only — does NOT cover ADRs like BABA or CEFs like RA):
+   - `https://www.marketbeat.com/dividends/ex-dividend-date/YYYY-MM-DD/`
+4. **Verify every Python dividend hit per-ticker** — for each ticker the Python script
+   reported, fetch `https://stockanalysis.com/stocks/TICKER/dividend/` and confirm the
+   ex-date and amount match. (If `stocks/` 404s, try `etf/`.)
+5. **Re-check UNCHECKED tickers** — if the script reported unchecked tickers
+   (`output/unchecked_tickers_YYYY-MM-DD.txt`), fetch those per-ticker pages
+   individually if there are a handful; if there are many, re-run the script later
+   instead. Do not skip this.
+6. **Spot-check known payers** — positions known to pay monthly (e.g. RA) or with
+   recently announced events, even if nothing else flagged them.
 
 Filter all results: only keep tickers whose **underlying** matches a position.
+
+**Why dividends are per-ticker (as of 2026-06):** every bulk dividend calendar tested
+(NASDAQ API, StockAnalysis calendar, EarningsWhispers, Finviz, Yahoo, WSJ, Barchart,
+Seeking Alpha) is either broken, bot-blocked, or misses ADRs/CEFs — MarketBeat's
+calendar listed 18 tickers for 2026-06-11 but missed both BABA and RA. Per-ticker
+pages are the only source that reliably covers everything.
 
 ### Step 6 — Write Claude's findings
 Write to `output/claude_results_YYYY-MM-DD.json`:
 ```json
 [
-  {"underlying": "AAPL", "event_type": "dividend", "amount_or_ratio": "0.25", "sources": ["NASDAQ", "MarketBeat"]},
-  {"underlying": "TSLA", "event_type": "split",    "amount_or_ratio": "3:1",   "sources": ["NASDAQTrader"]}
+  {"underlying": "BABA", "event_type": "dividend", "amount_or_ratio": "$1.030", "sources": ["StockAnalysis"]},
+  {"underlying": "SHPH", "event_type": "split",    "amount_or_ratio": "1 for 10", "sources": ["StockAnalysis", "NASDAQ"]}
 ]
 ```
 Write `[]` if nothing found — this signals the check completed with no hits.
@@ -117,7 +140,9 @@ Present a clear summary:
 - Items both sources agreed on
 
 ### Step 9 — Send the email
-If there are **no discrepancies**: send automatically.
+**Always send the email**, whether or not any events were found. A "nothing found" email is expected and confirms the check ran.
+
+If there are **no discrepancies** (including the case where nothing was found): send automatically.
 ```bash
 python check_events.py <positions_file>
 ```
@@ -127,7 +152,7 @@ If there are **discrepancies**: tell the user what they are, then ask:
 > Do you want me to send the email now with the discrepancies flagged in red,
 > or verify first and send after?"
 
-Only send after the user confirms.
+Only send after the user confirms in the discrepancy case.
 
 ---
 
@@ -137,18 +162,28 @@ Apply in this order — first match wins:
 
 | Instrument | Pattern examples | Action |
 |---|---|---|
-| Human-readable option | `AVGO JUN 05 2026 310.00 PUT`, `AMPG Oct 16 2026 7.50 CALL` | Extract first word (before the space) as underlying |
-| OCC option | `AAPL240119C00150000` | Extract leading letters as underlying |
-| Warrant | `ACMR.WS`, `ACMRW`, `ACMR.WT` | Strip `.WS`/`.WT`/trailing `W` |
-| Right | `ACMR.R`, `ACMRR` | Strip `.R`/trailing `R` |
-| Unit | `ACMR.U`, `ACMRU` | Strip `.U`/trailing `U` |
-| Preferred | `BAC.PA`, `BAC-PA`, `BACPA`, `BACPRA` | Strip preferred suffix; check underlying `BAC` |
-| Share class | `BRK.A`, `BRK-B` | Keep full ticker; it IS the common stock |
-| Common stock | `AAPL` | No change |
+| Human-readable option | `AVGO JUN 05 2026 310.00 PUT`, `XRX JAN 21 '28 7 CALL`, `ASST2 JAN 15 '27 3 CALL` | Extract first word as underlying. Year may be 4-digit (`2026`) or apostrophe form (`'28`). Underlying may contain a digit (`ASST2`). |
+| OCC option | `AAPL240119C00150000` | Extract leading symbol as underlying |
+| Space share class | `WSO B` | Convert to dot form: `WSO.B` |
+| Warrant (separator) | `ACMR.WS`, `ACMR.WT`, `ACMR.W` | Strip suffix — unambiguous |
+| Right / Unit (separator) | `ACMR.R`, `ACMR.U` | Strip suffix — unambiguous |
+| Preferred (separator) | `BAC.PA`, `BAC-PA` | Strip suffix; check underlying `BAC` |
+| Share class | `BRK.A`, `BRK-B` | Keep full ticker (normalize dash to dot: `BRK.B`) |
+| **Bare suffix — AMBIGUOUS** | `ACMRW`, `BACPA`, `BACPRA`, `GLW`, `AMPG` | Check **BOTH** the full ticker AND the stripped form |
+| Common stock | `AAPL`, `BABA`, `RA` | No change |
+
+**Bare-suffix ambiguity (critical):** a trailing `W`/`R`/`U` or `PA`–`PH`/`PRA`–`PRH`
+with no dot/dash separator cannot be disambiguated: `GLW` is Corning (common stock),
+not a GL warrant; `AMPG` is AmpliTech (common stock), not AM preferred. But `ZOOZW`
+really IS a ZOOZ warrant. So ambiguous tickers are checked under BOTH interpretations —
+the full ticker and the stripped underlying. This can produce occasional false-positive
+hits (e.g. a GL dividend attributed to a GLW position) — flag them for the user to
+dismiss; that is far cheaper than missing a real event. Bare-suffix stripping is
+skipped when the stripped form would be a single character (`AU` stays `AU`).
 
 **Human-readable option detection**: if the ticker string contains a space AND contains
-a month name (Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, Oct, Nov, Dec) AND ends with
-CALL or PUT, extract everything before the first space as the underlying.
+a month name (Jan–Dec) AND ends with CALL or PUT, extract everything before the first
+space as the underlying.
 
 When in doubt, err on the side of checking — a false positive is cheaper than a miss.
 
@@ -192,16 +227,24 @@ Name it "DividendsAndStockSplits". Use the 16-character code (no spaces) as EMAI
 
 ---
 
-## Known Source Issues (as of 2026-06-06)
+## Known Source Issues (as of 2026-06-10)
 
 | Source | Status | Notes |
 |---|---|---|
-| NASDAQ API (splits + dividends) | ✓ Working | Primary source — most reliable |
-| NASDAQTrader splits file | ✓ Working | Good secondary for splits |
-| MarketBeat dividends | ✓ Working | Good secondary for dividends |
-| TipRanks splits API | ✗ 403 Forbidden | Try HTML page instead |
-| StockAnalysis dividends | ✗ 404 | URL unreliable — skip if errors |
-| EarningsWhispers | ⚠ Inconsistent | Use if available |
+| StockAnalysis splits calendar | ✓ Working | Splits source 1 of 3. Data is in a SvelteKit inline script (JS object literals, `$`-prefixed symbols). **Missed VRNO on 2026-06-11** — never use alone. |
+| Benzinga splits calendar | ✓ Working | Splits source 2 of 3. Server-rendered table, explicit Ex-Date per row. Caught VRNO when StockAnalysis missed it. |
+| Investing.com splits calendar | ✓ Working | Splits source 3 of 3. Date-grouped table (date only on first row of each group). Also caught VRNO. |
+| StockTitan per-ticker news | ✓ Working | Split verification: `stocktitan.net/news/TICKER/` surfaces the company's own split press release (ratio + effective date). Used in Claude's Step 5, not by the script. |
+| StockAnalysis per-ticker dividends | ✓ Working | Primary dividends source — covers ADRs and ETFs. **Rate-limits (429) if hammered**; script paces at 0.8s/req with 120s backoff. Once daily is safe. |
+| NASDAQ HTML splits page | ✗ JS-rendered | Raw HTML has no data rows — always returned 0. Removed 2026-06-10. |
+| MarketBeat dividends calendar | ✓ Working | Supplementary — US equities only; missed BABA and RA on 2026-06-11 |
+| NASDAQ API (splits + dividends) | ✗ Timeout | Removed |
+| NASDAQTrader splits file | ✗ 404 | Removed |
+| TipRanks splits API | ✗ 403 Forbidden | Removed |
+| StockAnalysis dividends calendar | ✗ 404 | Removed |
+| EarningsWhispers | ✗ Error page | Removed |
+| Yahoo Finance batch quote API | ✗ 401 | Tested 2026-06-10 — now requires auth |
+| WSJ / Barchart / Seeking Alpha / dividend.com calendars | ✗ 404/blocked | Tested 2026-06-10 |
 
 ---
 
@@ -212,6 +255,7 @@ Name it "DividendsAndStockSplits". Use the 16-character code (no spaces) as EMAI
 | `output/python_results_YYYY-MM-DD.csv` | Python findings — attached to email |
 | `output/python_results_YYYY-MM-DD.json` | Python findings in JSON — used for comparison |
 | `output/claude_results_YYYY-MM-DD.json` | Claude's findings — written in Step 6 |
+| `output/unchecked_tickers_YYYY-MM-DD.txt` | Tickers the script could NOT verify (rate limit/errors) — only written when non-empty. Presence means the report is incomplete. |
 
 The `output/` directory and all `.xlsx` files are gitignored.
 
@@ -224,6 +268,7 @@ The `output/` directory and all `.xlsx` files are gitignored.
 | Both agree | High confidence | Proceed |
 | Claude only | Python scraper missed it | **Verify manually before acting** |
 | Python only | Claude missed a source | **Verify manually before acting** |
+| INCOMPLETE CHECK warning | Rate limiting / fetch errors — some tickers never verified | **Treat as a discrepancy.** Re-run or verify the unchecked list before trusting the report |
 
 Never act on a discrepancy without human confirmation. The email flags these in red.
 

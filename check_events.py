@@ -188,7 +188,17 @@ def main() -> None:
     all_splits    = get_all_splits(target_date)
 
     logger.info("Scraping dividend sources...")
-    all_dividends = get_all_dividends(target_date)
+    all_dividends, unchecked_tickers = get_all_dividends(target_date, tickers=list(position_map.keys()))
+
+    # Tickers that could not be verified (rate limit / errors) — write them out
+    # and surface loudly. An empty result with a long unchecked list means the
+    # check FAILED, not "no events tomorrow".
+    if unchecked_tickers:
+        unchecked_path = OUTPUT_DIR / f"unchecked_tickers_{target_date.isoformat()}.txt"
+        unchecked_path.write_text('\n'.join(sorted(unchecked_tickers)))
+        logger.warning(
+            f"{len(unchecked_tickers)} ticker(s) UNCHECKED — full list: {unchecked_path}"
+        )
 
     # 3. Filter to positions we hold
     position_splits    = filter_positions(position_map, all_splits)
@@ -239,6 +249,21 @@ def main() -> None:
             "Run Claude's independent check first (see CLAUDE.md), "
             "then re-run this script to compare."
         )
+
+    # Unchecked tickers are a discrepancy: the report may be incomplete.
+    # This blocks the auto-send path so a rate-limited run can never go out
+    # looking like a clean "no events" day.
+    if unchecked_tickers:
+        preview = ', '.join(sorted(unchecked_tickers)[:10])
+        more    = f" (+{len(unchecked_tickers) - 10} more)" if len(unchecked_tickers) > 10 else ''
+        warning = (
+            f"INCOMPLETE CHECK: {len(unchecked_tickers)} ticker(s) could not be "
+            f"verified on StockAnalysis (rate limit/errors): {preview}{more}. "
+            f"Full list: output/unchecked_tickers_{target_date.isoformat()}.txt. "
+            f"VERIFY OR RE-RUN BEFORE TRUSTING THIS REPORT."
+        )
+        discrepancies.append(warning)
+        print(f"\n[!!] {warning}")
 
     # 8. Send email
     if not args.no_email:
