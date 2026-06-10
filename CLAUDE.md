@@ -66,11 +66,13 @@ This produces:
 - `output/python_results_YYYY-MM-DD.json`
 - `output/unchecked_tickers_YYYY-MM-DD.txt` — only if some tickers could not be verified
 
-**Runtime & rate limits:** the dividend check hits StockAnalysis once per ticker at 0.8s
-pacing — expect **~15–20 minutes** for ~1000+ tickers, with progress logged every 100.
+**Runtime & rate limits:** the dividend check hits StockAnalysis once per ticker at 1.2s
+pacing — expect **~30–45 minutes** for ~1400 tickers, with progress logged every 100.
 Run it in the background. Do NOT run the script repeatedly in quick succession;
 StockAnalysis rate-limits (HTTP 429) and the script will stall in 120s backoff loops.
-Once per day is safe.
+Once per day is safe. If a run was aborted or rate-limited, wait AT LEAST 2 hours
+before retrying at full scale — the limiter tracks a long window, and back-to-back
+full runs stall from the very first request.
 
 **If the output reports UNCHECKED tickers**, the report is INCOMPLETE — some tickers
 could not be verified (rate limit/errors). This is automatically appended to the
@@ -99,6 +101,11 @@ Claude's check is targeted:
 4. **Verify every Python dividend hit per-ticker** — for each ticker the Python script
    reported, fetch `https://stockanalysis.com/stocks/TICKER/dividend/` and confirm the
    ex-date and amount match. (If `stocks/` 404s, try `etf/`.)
+   **ADR amount trap:** for ADRs (BABA, etc.), StockAnalysis lists the dividend NET of
+   the ~$0.02/ADS depositary fee (e.g. shows $1.030 when Alibaba declared $1.05).
+   For any ADR hit, verify the declared gross amount via the company's 6-K/press
+   release or MarketBeat — the gross is what the price drops by on ex-date, so the
+   gross is what goes in the report and GTC adjustments.
 5. **Re-check UNCHECKED tickers** — if the script reported unchecked tickers
    (`output/unchecked_tickers_YYYY-MM-DD.txt`), fetch those per-ticker pages
    individually if there are a handful; if there are many, re-run the script later

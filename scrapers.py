@@ -423,7 +423,7 @@ def _fetch_sa_dividend(ticker: str, target_date: datetime.date) -> tuple[str, di
                 paths). False if any request errored — the ticker is UNCHECKED
                 and must be reported as such, never treated as "no event".
     """
-    time.sleep(0.8)   # 0.8s pacing keeps us well under StockAnalysis rate limits
+    time.sleep(1.2)   # 1.2s pacing — 0.8s proved too aggressive at full scale (sustained 429s)
     any_error = False
     for path_prefix in ('stocks', 'etf'):
         url = f'https://stockanalysis.com/{path_prefix}/{ticker.lower()}/dividend/'
@@ -459,7 +459,7 @@ def scrape_stockanalysis_dividends_perticker(
     skipped = len(tickers) - len(valid)
     if skipped:
         logger.info(f"StockAnalysis per-ticker: skipping {skipped} non-equity tickers (CUSIPs, options, etc.)")
-    logger.info(f"StockAnalysis per-ticker: checking {len(valid)} tickers (~{len(valid) * 0.9 / 60:.0f} min)...")
+    logger.info(f"StockAnalysis per-ticker: checking {len(valid)} tickers (~{len(valid) * 1.5 / 60:.0f} min)...")
 
     for done, t in enumerate(sorted(valid), start=1):
         ticker, result, checked = _fetch_sa_dividend(t, target_date)
@@ -492,22 +492,49 @@ def scrape_stockanalysis_dividends_perticker(
 # ---------------------------------------------------------------------------
 
 def scrape_marketbeat_dividends(target_date: datetime.date) -> dict[str, dict]:
-    """MarketBeat dividend calendar — supplementary cross-check for US equities."""
+    """
+    MarketBeat dividend announcements — supplementary cross-check for US equities.
+
+    NOTE: the /ex-dividend-date/YYYY-MM-DD/ URL is misleading — the page IGNORES
+    the date and always shows a rolling table of recent dividend announcements
+    with mixed ex-dates. We MUST filter rows by the Ex-Dividend Date column;
+    trusting all rows would report dividends weeks early.
+    Table columns: Company | Period | Amount | Yield | Ex-Dividend Date | ...
+    The Company cell starts with the ticker ("CASY Casey's General Stores").
+    """
     results: dict[str, dict] = {}
-    date_str = target_date.strftime('%Y-%m-%d')
-    url = f'https://www.marketbeat.com/dividends/ex-dividend-date/{date_str}/'
+    url = f'https://www.marketbeat.com/dividends/ex-dividend-date/{target_date.isoformat()}/'
     resp = _get(url)
     if not resp:
         return results
+
+    # MarketBeat date format has no leading zeros: 6/11/2026
+    date_mdy = f'{target_date.month}/{target_date.day}/{target_date.year}'
+
     soup = BeautifulSoup(resp.text, 'html.parser')
-    for row in soup.select('table tbody tr, .dividend-table tr'):
-        cells = row.find_all('td')
-        if len(cells) < 2:
+    for table in soup.find_all('table'):
+        headers = [th.get_text(strip=True).lower() for th in table.find_all('th')]
+        try:
+            i_company = next(i for i, h in enumerate(headers) if 'company' in h)
+            i_amount  = next(i for i, h in enumerate(headers) if 'amount' in h)
+            i_exdate  = next(i for i, h in enumerate(headers) if 'ex-dividend' in h or 'ex dividend' in h)
+        except StopIteration:
             continue
-        sym = cells[0].get_text(strip=True).upper()
-        amt = cells[2].get_text(strip=True) if len(cells) > 2 else ''
-        if sym:
-            results[sym] = {'amount': amt, 'source': 'MarketBeat'}
+
+        for row in table.find_all('tr'):
+            cells = row.find_all('td')
+            if len(cells) <= max(i_company, i_amount, i_exdate):
+                continue
+            if cells[i_exdate].get_text(strip=True) != date_mdy:
+                continue
+            # Ticker is the first whitespace token of the company cell
+            company_text = cells[i_company].get_text(' ', strip=True)
+            sym = company_text.split()[0].upper() if company_text else ''
+            amt = cells[i_amount].get_text(strip=True)
+            if sym and re.match(r'^[A-Z0-9.]{1,10}$', sym):
+                results[sym] = {'amount': amt, 'source': 'MarketBeat'}
+        break
+
     return results
 
 

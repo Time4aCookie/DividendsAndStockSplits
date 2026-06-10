@@ -6,7 +6,7 @@ Daily automation for equity traders. After market close, checks all positions (a
 
 ## How It Works
 
-1. **Python script** scrapes 3 split calendars and checks dividends **per-ticker** (every position individually — bulk dividend calendars miss ADRs and CEFs), filters to your positions, writes a CSV + JSON. Takes ~15–20 minutes for ~1000 tickers due to rate-limit pacing. Any ticker it fails to verify is reported as UNCHECKED rather than silently skipped.
+1. **Python script** scrapes 3 split calendars and checks dividends **per-ticker** (every position individually — bulk dividend calendars miss ADRs and CEFs), filters to your positions, writes a CSV + JSON. Takes ~30–45 minutes for ~1400 tickers due to rate-limit pacing. Any ticker it fails to verify is reported as UNCHECKED rather than silently skipped.
 2. **Claude** independently verifies: re-reads the split calendars, confirms every split against the company's own press release, cross-checks dividends against a second calendar, and confirms every dividend hit on the ticker's own page.
 3. Both results are compared — discrepancies are highlighted in the email and console.
 4. A formatted HTML email with the attached CSV is sent to 5 recipients — **always**, even when nothing was found (a "no events" email confirms the check ran).
