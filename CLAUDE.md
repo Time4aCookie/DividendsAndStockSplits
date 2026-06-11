@@ -66,13 +66,19 @@ This produces:
 - `output/python_results_YYYY-MM-DD.json`
 - `output/unchecked_tickers_YYYY-MM-DD.txt` — only if some tickers could not be verified
 
-**Runtime & rate limits:** the dividend check hits StockAnalysis once per ticker at 1.2s
-pacing — expect **~30–45 minutes** for ~1400 tickers, with progress logged every 100.
-Run it in the background. Do NOT run the script repeatedly in quick succession;
-StockAnalysis rate-limits (HTTP 429) and the script will stall in 120s backoff loops.
-Once per day is safe. If a run was aborted or rate-limited, wait AT LEAST 2 hours
-before retrying at full scale — the limiter tracks a long window, and back-to-back
-full runs stall from the very first request.
+**Modes & runtime:**
+- **Fast mode (default)** — ~1 minute. Benzinga bulk dividend calendar (1 request,
+  covers ADRs/CEFs, gross amounts) + MarketBeat (1 request) + StockAnalysis
+  per-ticker verification of position hits only. Use this for the daily check.
+- **Deep mode (`--deep`)** — ~30–45 minutes. Additionally sweeps every position
+  ticker on StockAnalysis individually. Rate-limit sensitive: StockAnalysis 429s
+  if hammered, and after an aborted full sweep the limiter needs **2+ hours** to
+  reset. Use occasionally to audit that the bulk sources aren't missing anything,
+  never twice in one day.
+
+**After midnight:** the default target date is the next trading day from *today* —
+if running after midnight for that same morning's market open, pass
+`--date YYYY-MM-DD` explicitly or the script will target the following day.
 
 **If the output reports UNCHECKED tickers**, the report is INCOMPLETE — some tickers
 could not be verified (rate limit/errors). This is automatically appended to the
@@ -95,9 +101,13 @@ Claude's check is targeted:
    with matching ratio and effective date. If StockTitan has nothing, WebSearch
    `"<company> reverse stock split <date>"` for the press release. A split hit with no
    findable announcement is a discrepancy — flag it.
-3. **MarketBeat dividend calendar (bulk)** — match against positions
-   (US equities only — does NOT cover ADRs like BABA or CEFs like RA):
-   - `https://www.marketbeat.com/dividends/ex-dividend-date/YYYY-MM-DD/`
+3. **Dividend calendars (bulk)** — match against positions:
+   - `https://www.benzinga.com/calendars/dividends` — PRIMARY: covers ADRs (BABA),
+     CEFs (RA), preferred series; shows declared GROSS amounts. Filter Ex-Date column
+     to target date.
+   - `https://www.marketbeat.com/dividends/ex-dividend-date/YYYY-MM-DD/` — secondary;
+     US equities only, and the page IGNORES the URL date (shows recent announcements
+     with mixed ex-dates — always filter by the Ex-Dividend Date column).
 4. **Verify every Python dividend hit per-ticker** — for each ticker the Python script
    reported, fetch `https://stockanalysis.com/stocks/TICKER/dividend/` and confirm the
    ex-date and amount match. (If `stocks/` 404s, try `etf/`.)
@@ -242,7 +252,8 @@ Name it "DividendsAndStockSplits". Use the 16-character code (no spaces) as EMAI
 | Benzinga splits calendar | ✓ Working | Splits source 2 of 3. Server-rendered table, explicit Ex-Date per row. Caught VRNO when StockAnalysis missed it. |
 | Investing.com splits calendar | ✓ Working | Splits source 3 of 3. Date-grouped table (date only on first row of each group). Also caught VRNO. |
 | StockTitan per-ticker news | ✓ Working | Split verification: `stocktitan.net/news/TICKER/` surfaces the company's own split press release (ratio + effective date). Used in Claude's Step 5, not by the script. |
-| StockAnalysis per-ticker dividends | ✓ Working | Primary dividends source — covers ADRs and ETFs. **Rate-limits (429) if hammered**; script paces at 0.8s/req with 120s backoff. Once daily is safe. |
+| Benzinga dividends calendar | ✓ Working | PRIMARY dividends source — one request covers the whole market incl. ADRs (BABA $1.05 gross) and CEFs (RA). Found 60 tickers for 2026-06-11 when NASDAQ API found 6 and MarketBeat 0. |
+| StockAnalysis per-ticker dividends | ✓ Working | Hit verification + `--deep` audit sweeps. **Rate-limits (429) if hammered**; 1.2s pacing, 120s backoff, 2+ hour cooldown after an aborted sweep. ADR amounts shown NET of depositary fee — use Benzinga/6-K gross. |
 | NASDAQ HTML splits page | ✗ JS-rendered | Raw HTML has no data rows — always returned 0. Removed 2026-06-10. |
 | MarketBeat dividends calendar | ✓ Working | Supplementary — US equities only; missed BABA and RA on 2026-06-11 |
 | NASDAQ API (splits + dividends) | ✗ Timeout | Removed |

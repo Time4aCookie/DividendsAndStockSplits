@@ -162,6 +162,10 @@ def main() -> None:
     parser.add_argument('--date',     help='Target date YYYY-MM-DD (default: next trading day)')
     parser.add_argument('--gtc',      help='Path to GTC orders Excel file (optional)')
     parser.add_argument('--no-email', action='store_true', help='Skip sending email')
+    parser.add_argument('--deep', action='store_true',
+                        help='Full per-ticker StockAnalysis sweep (~30-45 min, rate-limit '
+                             'sensitive). Default fast mode uses bulk calendars + per-ticker '
+                             'verification of hits only (~1 min).')
     args = parser.parse_args()
 
     target_date = (
@@ -188,7 +192,9 @@ def main() -> None:
     all_splits    = get_all_splits(target_date)
 
     logger.info("Scraping dividend sources...")
-    all_dividends, unchecked_tickers = get_all_dividends(target_date, tickers=list(position_map.keys()))
+    all_dividends, unchecked_tickers = get_all_dividends(
+        target_date, tickers=list(position_map.keys()), deep=args.deep,
+    )
 
     # Tickers that could not be verified (rate limit / errors) — write them out
     # and surface loudly. An empty result with a long unchecked list means the

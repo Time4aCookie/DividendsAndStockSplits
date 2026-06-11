@@ -6,7 +6,7 @@ Daily automation for equity traders. After market close, checks all positions (a
 
 ## How It Works
 
-1. **Python script** scrapes 3 split calendars and checks dividends **per-ticker** (every position individually — bulk dividend calendars miss ADRs and CEFs), filters to your positions, writes a CSV + JSON. Takes ~30–45 minutes for ~1400 tickers due to rate-limit pacing. Any ticker it fails to verify is reported as UNCHECKED rather than silently skipped.
+1. **Python script** scrapes 3 split calendars and the Benzinga market-wide dividend calendar (covers ADRs and CEFs that other calendars miss), filters to your positions, verifies each hit on StockAnalysis, and writes a CSV + JSON. Fast mode (default) takes ~1 minute; `--deep` additionally sweeps every position ticker individually (~30–45 min) as an occasional audit. Any failed verification is reported as UNCHECKED rather than silently skipped.
 2. **Claude** independently verifies: re-reads the split calendars, confirms every split against the company's own press release, cross-checks dividends against a second calendar, and confirms every dividend hit on the ticker's own page.
 3. Both results are compared — discrepancies are highlighted in the email and console.
 4. A formatted HTML email with the attached CSV is sent to 5 recipients — **always**, even when nothing was found (a "no events" email confirms the check ran).
@@ -121,11 +121,12 @@ The `output/` directory and all Excel files are gitignored.
 
 Claude additionally verifies every split hit against the company's own press release (`stocktitan.net/news/TICKER/`) — the only check independent of all calendars.
 
-### Dividends — per-ticker primary + calendar cross-check
+### Dividends — bulk primary + per-ticker verification
 | Source | Notes |
 |---|---|
-| StockAnalysis per-ticker (`stockanalysis.com/stocks/TICKER/dividend/`) | Primary — only source covering US equities, ADRs (BABA), and CEFs (RA). Rate-limited: the script paces at 0.8s/request with 120s backoff on 429. Run at most once daily |
-| MarketBeat (`marketbeat.com/dividends/ex-dividend-date/`) | Supplementary calendar — US equities only; missed BABA and RA on 2026-06-11 |
+| Benzinga (`benzinga.com/calendars/dividends`) | Primary bulk — one request, whole market incl. ADRs (BABA) and CEFs (RA), declared gross amounts. Found 60 tickers for 2026-06-11 vs NASDAQ API's 6 |
+| StockAnalysis per-ticker (`stockanalysis.com/stocks/TICKER/dividend/`) | Verifies position hits; full sweep via `--deep` (~30–45 min, 1.2s pacing, rate-limit sensitive). ADR amounts shown net of depositary fee — gross comes from Benzinga/company 6-K |
+| MarketBeat (`marketbeat.com/dividends/ex-dividend-date/`) | Secondary calendar — US equities only; page ignores the URL date, so rows are filtered by their Ex-Dividend Date column |
 
 ### Dead sources — removed, do not re-add without re-testing
 NASDAQ API (timeout), NASDAQ splits HTML (JS-rendered, no data in raw HTML), NASDAQTrader splits.txt (404), TipRanks (403), StockAnalysis dividends calendar (404), EarningsWhispers (error page), Yahoo Finance batch API (401), Finviz / WSJ / Barchart / Seeking Alpha / dividend.com (blocked or no coverage).

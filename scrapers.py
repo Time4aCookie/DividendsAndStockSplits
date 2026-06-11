@@ -488,6 +488,51 @@ def scrape_stockanalysis_dividends_perticker(
 
 
 # ---------------------------------------------------------------------------
+# DIVIDENDS — Benzinga calendar (primary bulk source)
+# ---------------------------------------------------------------------------
+
+def scrape_benzinga_dividends(target_date: datetime.date) -> dict[str, dict]:
+    """
+    Benzinga dividends calendar — primary bulk source. One server-rendered
+    table covers the whole market for several days around today, INCLUDING
+    ADRs (BABA) and CEFs (RA) that other calendars miss. Amounts are the
+    declared GROSS (e.g. BABA $1.05), which is what the price drops by on
+    ex-date — unlike StockAnalysis, which lists ADRs net of depositary fees.
+    Table columns: Ex-Date | ticker | Company | Payments per year | Dividend | Yield | ...
+    """
+    results: dict[str, dict] = {}
+    resp = _get('https://www.benzinga.com/calendars/dividends', timeout=25)
+    if not resp:
+        return results
+
+    date_mdY = target_date.strftime('%m/%d/%Y')   # Benzinga format: 06/11/2026
+    soup = BeautifulSoup(resp.text, 'html.parser')
+
+    for table in soup.find_all('table'):
+        headers = [th.get_text(strip=True).replace('▲', '').replace('▼', '').strip().lower()
+                   for th in table.find_all('th')]
+        try:
+            i_date   = next(i for i, h in enumerate(headers) if 'ex-date' in h or 'ex date' in h)
+            i_ticker = next(i for i, h in enumerate(headers) if 'ticker' in h or 'symbol' in h)
+            i_amount = next(i for i, h in enumerate(headers) if h == 'dividend' or 'amount' in h)
+        except StopIteration:
+            continue
+
+        for row in table.find_all('tr'):
+            cells = row.find_all('td')
+            if len(cells) <= max(i_date, i_ticker, i_amount):
+                continue
+            if cells[i_date].get_text(strip=True) == date_mdY:
+                sym = cells[i_ticker].get_text(strip=True).upper()
+                amt = cells[i_amount].get_text(strip=True)
+                if sym and re.match(r'^[A-Z0-9.]{1,10}$', sym):
+                    results[sym] = {'amount': amt, 'source': 'Benzinga'}
+        break
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # DIVIDENDS — MarketBeat calendar (supplementary)
 # ---------------------------------------------------------------------------
 
@@ -545,16 +590,26 @@ def scrape_marketbeat_dividends(target_date: datetime.date) -> dict[str, dict]:
 def get_all_dividends(
     target_date: datetime.date,
     tickers: list[str] | None = None,
+    deep: bool = False,
 ) -> tuple[dict[str, dict], list[str]]:
     """
     Aggregate dividends from all sources.
-    tickers: underlying tickers from our positions — required for the per-ticker check.
+    tickers: underlying tickers from our positions.
+
+    Fast mode (default): Benzinga bulk calendar (1 request, covers ADRs/CEFs,
+    gross amounts) + MarketBeat bulk (1 request) + StockAnalysis per-ticker
+    verification of position hits only (a handful of requests). ~1 minute.
+
+    Deep mode (--deep): additionally sweeps EVERY position ticker on
+    StockAnalysis per-ticker (~30-45 min, rate-limit sensitive). Use as an
+    occasional audit of the bulk sources, not for the daily run.
 
     Returns (merged, unchecked):
       merged    — {ticker: {'amount': str, 'sources': [str, ...]}}
-      unchecked — tickers the per-ticker check could not verify (rate limit /
-                  errors). Caller MUST surface these; an empty result with a
-                  long unchecked list means the check failed, not "no events".
+      unchecked — tickers that could not be verified. In fast mode, if the
+                  primary bulk source fails entirely, ALL checkable tickers
+                  are reported unchecked — a failed sweep must never look
+                  like a clean "no events" day.
     """
     merged:    dict[str, dict] = {}
     unchecked: list[str] = []
@@ -567,27 +622,61 @@ def get_all_dividends(
         if not merged[sym]['amount'] and amount:
             merged[sym]['amount'] = amount
 
-    # Primary: per-ticker StockAnalysis (covers ADRs, ETFs, and all US equities)
-    if tickers:
+    # Primary bulk: Benzinga (gross amounts first so they win the merge)
+    benzinga_ok = False
+    try:
+        bz = scrape_benzinga_dividends(target_date)
+        benzinga_ok = len(bz) > 0
+        logger.info(f"Benzinga dividends: {len(bz)} tickers for {target_date}")
+        for sym, info in bz.items():
+            _add(sym, info.get('amount', ''), 'Benzinga')
+    except Exception as e:
+        logger.error(f"Benzinga dividends failed: {e}")
+
+    time.sleep(0.5)
+
+    # Secondary bulk: MarketBeat (date-filtered announcements)
+    try:
+        mb = scrape_marketbeat_dividends(target_date)
+        logger.info(f"MarketBeat dividends: {len(mb)} tickers for {target_date}")
+        for sym, info in mb.items():
+            _add(sym, info.get('amount', ''), 'MarketBeat')
+    except Exception as e:
+        logger.error(f"MarketBeat dividends failed: {e}")
+
+    if deep and tickers:
+        # Full per-ticker sweep — slow, thorough audit
         try:
             sa_results, unchecked = scrape_stockanalysis_dividends_perticker(target_date, tickers)
             for sym, info in sa_results.items():
                 _add(sym, info.get('amount', ''), 'StockAnalysis')
         except Exception as e:
-            logger.error(f"StockAnalysis per-ticker failed: {e}")
-            unchecked = [t for t in tickers if _is_checkable_ticker(t)]   # nothing was verified
-    else:
-        logger.warning("No tickers supplied to get_all_dividends — per-ticker check skipped")
-
-    time.sleep(0.5)
-
-    # Supplementary: MarketBeat calendar (single request, good cross-check for US equities)
-    try:
-        mb = scrape_marketbeat_dividends(target_date)
-        logger.info(f"MarketBeat dividends: {len(mb)} tickers")
-        for sym, info in mb.items():
-            _add(sym, info.get('amount', ''), 'MarketBeat')
-    except Exception as e:
-        logger.error(f"MarketBeat dividends failed: {e}")
+            logger.error(f"StockAnalysis per-ticker sweep failed: {e}")
+            unchecked = [t for t in tickers if _is_checkable_ticker(t)]
+    elif tickers:
+        if not benzinga_ok:
+            # Bulk sweep failed — we have no comprehensive coverage. Everything
+            # is unverified; MarketBeat alone misses ADRs/CEFs.
+            logger.warning(
+                "Benzinga bulk returned nothing — no comprehensive dividend sweep ran. "
+                "All tickers reported UNCHECKED; re-run later or use --deep."
+            )
+            unchecked = [t for t in tickers if _is_checkable_ticker(t)]
+        else:
+            # Verify position hits on StockAnalysis per-ticker (cheap: only hits).
+            # Keep the bulk (gross) amount — SA lists ADRs net of depositary fees.
+            position_hits = [sym for sym in merged if sym in set(tickers)]
+            for sym in position_hits:
+                try:
+                    _, result, checked = _fetch_sa_dividend(sym, target_date)
+                    if result is not None:
+                        _add(sym, '', 'StockAnalysis')   # confirm source, keep bulk amount
+                    elif checked:
+                        logger.warning(
+                            f"  {sym}: bulk sources show a dividend but StockAnalysis does not — "
+                            f"flagging for manual verification"
+                        )
+                except Exception as e:
+                    logger.warning(f"  {sym}: SA verification errored ({e}) — hit stands on bulk sources")
 
     return merged, unchecked
