@@ -236,8 +236,9 @@ When a position has a split or dividend ex-date tomorrow:
 
 Sender: `rohantatikonda@gmail.com` (Gmail app password required)
 Recipients: stored in `.env` as `EMAIL_RECIPIENTS` (comma-separated; currently one
-address — `rohan@jagtradingllc.com`. **Watch for typos**: a trailing character in
-this field silently swallowed two reports on 2026-06-10 before being caught).
+address — `rohant@jagtradingllc.com`, note the **t** after rohan. **Watch for typos**:
+wrong addresses silently swallowed three reports on 2026-06-10/11 before being caught —
+SMTP accepts invalid recipients without error).
 
 ### First-time setup on a new machine
 ```bash
