@@ -67,14 +67,17 @@ This produces:
 - `output/unchecked_tickers_YYYY-MM-DD.txt` — only if some tickers could not be verified
 
 **Modes & runtime:**
-- **Fast mode (default)** — ~1 minute. Benzinga bulk dividend calendar (1 request,
-  covers ADRs/CEFs, gross amounts) + MarketBeat (1 request) + StockAnalysis
-  per-ticker verification of position hits only. Use this for the daily check.
-- **Deep mode (`--deep`)** — ~30–45 minutes. Additionally sweeps every position
-  ticker on StockAnalysis individually. Rate-limit sensitive: StockAnalysis 429s
-  if hammered, and after an aborted full sweep the limiter needs **2+ hours** to
-  reset. Use occasionally to audit that the bulk sources aren't missing anything,
-  never twice in one day.
+- **Fast mode (default)** — ~1 minute. Benzinga bulk dividend calendar + Investing.com
+  AJAX bulk (each 1 request, both cover ADRs/CEFs; Benzinga gross amounts win the
+  merge) + MarketBeat (1 request) + StockAnalysis per-ticker verification of position
+  hits only. Use this for the daily check — always.
+- **Deep mode (`--deep`)** — **NOT VIABLE at this portfolio's scale (~1400 tickers).**
+  Tested 2026-06-11: StockAnalysis's rate limiter has a budget far below 1400
+  requests — the sweep ran 3 hours, spent ~100% of its time in 429 backoff loops,
+  and was killed unfinished. Even an 8-hour quiet gap did not reset the budget.
+  Only use `--deep` for small ticker sets. The effective audit of fast mode is the
+  **union of the two independent comprehensive calendars** (Benzinga + Investing.com,
+  which have different blind spots) plus Claude's independent Step 5 checks.
 
 **After midnight:** the default target date is the next trading day from *today* —
 if running after midnight for that same morning's market open, pass
@@ -254,7 +257,7 @@ Name it "DividendsAndStockSplits". Use the 16-character code (no spaces) as EMAI
 | StockTitan per-ticker news | ✓ Working | Split verification: `stocktitan.net/news/TICKER/` surfaces the company's own split press release (ratio + effective date). Used in Claude's Step 5, not by the script. |
 | Benzinga dividends calendar | ✓ Working | PRIMARY dividends source — one request covers the whole market incl. ADRs (BABA $1.05 gross) and CEFs (RA). Found 60 tickers for 2026-06-11 when NASDAQ API found 6 and MarketBeat 0. |
 | Investing.com dividends AJAX | ✓ Working | Second comprehensive bulk (script-only — POST endpoint, Claude's WebFetch cannot POST). Covers ADRs/CEFs incl. foreign Y-suffix ADRs Benzinga misses; Benzinga uniquely covers some preferreds/CEFs. ADR amounts NET of fees — Benzinga gross wins the merge. |
-| StockAnalysis per-ticker dividends | ✓ Working | Hit verification + `--deep` audit sweeps. **Rate-limits (429) if hammered**; 1.2s pacing, 120s backoff, 2+ hour cooldown after an aborted sweep. ADR amounts shown NET of depositary fee — use Benzinga/6-K gross. |
+| StockAnalysis per-ticker dividends | ⚠ Hit verification ONLY | Fine for a handful of requests (verifying hits). **Cannot sustain full-portfolio sweeps** — daily request budget is far below 1400; a 2026-06-11 sweep attempt spent 3 hours in 429 backoff and was killed. ADR amounts shown NET of depositary fee — use Benzinga/6-K gross. |
 | NASDAQ HTML splits page | ✗ JS-rendered | Raw HTML has no data rows — always returned 0. Removed 2026-06-10. |
 | MarketBeat dividends calendar | ✓ Working | Supplementary — US equities only; missed BABA and RA on 2026-06-11 |
 | NASDAQ API (splits + dividends) | ✗ Timeout | Removed |
