@@ -253,6 +253,7 @@ Name it "DividendsAndStockSplits". Use the 16-character code (no spaces) as EMAI
 | Investing.com splits calendar | ✓ Working | Splits source 3 of 3. Date-grouped table (date only on first row of each group). Also caught VRNO. |
 | StockTitan per-ticker news | ✓ Working | Split verification: `stocktitan.net/news/TICKER/` surfaces the company's own split press release (ratio + effective date). Used in Claude's Step 5, not by the script. |
 | Benzinga dividends calendar | ✓ Working | PRIMARY dividends source — one request covers the whole market incl. ADRs (BABA $1.05 gross) and CEFs (RA). Found 60 tickers for 2026-06-11 when NASDAQ API found 6 and MarketBeat 0. |
+| Investing.com dividends AJAX | ✓ Working | Second comprehensive bulk (script-only — POST endpoint, Claude's WebFetch cannot POST). Covers ADRs/CEFs incl. foreign Y-suffix ADRs Benzinga misses; Benzinga uniquely covers some preferreds/CEFs. ADR amounts NET of fees — Benzinga gross wins the merge. |
 | StockAnalysis per-ticker dividends | ✓ Working | Hit verification + `--deep` audit sweeps. **Rate-limits (429) if hammered**; 1.2s pacing, 120s backoff, 2+ hour cooldown after an aborted sweep. ADR amounts shown NET of depositary fee — use Benzinga/6-K gross. |
 | NASDAQ HTML splits page | ✗ JS-rendered | Raw HTML has no data rows — always returned 0. Removed 2026-06-10. |
 | MarketBeat dividends calendar | ✓ Working | Supplementary — US equities only; missed BABA and RA on 2026-06-11 |

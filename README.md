@@ -125,6 +125,7 @@ Claude additionally verifies every split hit against the company's own press rel
 | Source | Notes |
 |---|---|
 | Benzinga (`benzinga.com/calendars/dividends`) | Primary bulk — one request, whole market incl. ADRs (BABA) and CEFs (RA), declared gross amounts. Found 60 tickers for 2026-06-11 vs NASDAQ API's 6 |
+| Investing.com dividends AJAX (`/dividends-calendar/Service/getCalendarFilteredData`) | Second comprehensive bulk (POST with date filter, country=US). Covers foreign Y-suffix ADRs Benzinga misses; ADR amounts net of fees so Benzinga's gross wins the merge |
 | StockAnalysis per-ticker (`stockanalysis.com/stocks/TICKER/dividend/`) | Verifies position hits; full sweep via `--deep` (~30–45 min, 1.2s pacing, rate-limit sensitive). ADR amounts shown net of depositary fee — gross comes from Benzinga/company 6-K |
 | MarketBeat (`marketbeat.com/dividends/ex-dividend-date/`) | Secondary calendar — US equities only; page ignores the URL date, so rows are filtered by their Ex-Dividend Date column |
 
@@ -143,6 +144,7 @@ DividendsAndStockSplits/
 ├── ticker_utils.py      # Underlying ticker extraction
 ├── email_sender.py      # SMTP email with HTML report (Gmail + Outlook, auto-detected)
 ├── compare.py           # Python vs Claude result comparison
+├── test_all.py          # Offline regression suite — run after any change (no network needed)
 ├── requirements.txt
 ├── .env.example         # Credential template
 └── .env                 # Gitignored — your credentials

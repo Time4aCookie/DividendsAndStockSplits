@@ -533,6 +533,59 @@ def scrape_benzinga_dividends(target_date: datetime.date) -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
+# DIVIDENDS — Investing.com calendar (second comprehensive bulk source)
+# ---------------------------------------------------------------------------
+
+def scrape_investing_dividends(target_date: datetime.date) -> dict[str, dict]:
+    """
+    Investing.com dividends calendar via its AJAX endpoint (POST with a date
+    filter, country=US). Second comprehensive bulk source — covers ADRs and
+    CEFs like Benzinga. NOTE: lists ADR amounts NET of depositary fees (BABA
+    shows 1.03, not the declared 1.05), so it ranks below Benzinga in the
+    merge — its amounts only fill in when Benzinga lacks the ticker.
+    """
+    results: dict[str, dict] = {}
+    try:
+        resp = SESSION.post(
+            'https://www.investing.com/dividends-calendar/Service/getCalendarFilteredData',
+            data={
+                'country[]': '5',                       # United States
+                'dateFrom': target_date.isoformat(),
+                'dateTo':   target_date.isoformat(),
+                'currentTab': 'custom',
+                'limit_from': '0',
+            },
+            headers={
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': 'https://www.investing.com/dividends-calendar/',
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        html = payload.get('data', '') if isinstance(payload, dict) else ''
+    except Exception as e:
+        logger.warning(f"Investing.com dividends request failed: {e}")
+        return results
+
+    date_variants = _date_variants(target_date)
+    soup = BeautifulSoup(f'<table>{html}</table>', 'html.parser')
+    for row in soup.find_all('tr'):
+        cells = row.find_all('td')
+        if len(cells) < 4:
+            continue
+        # Columns: flag | company (ticker in <a>) | ex-date | amount | ...
+        a = cells[1].find('a')
+        sym = a.get_text(strip=True).upper() if a else ''
+        date_text = cells[2].get_text(strip=True)
+        amt = cells[3].get_text(strip=True)
+        if sym and re.match(r'^[A-Z0-9.]{1,10}$', sym) and any(v in date_text for v in date_variants):
+            results[sym] = {'amount': f'${amt}' if amt and not amt.startswith('$') else amt,
+                            'source': 'Investing.com'}
+    return results
+
+
+# ---------------------------------------------------------------------------
 # DIVIDENDS — MarketBeat calendar (supplementary)
 # ---------------------------------------------------------------------------
 
@@ -635,7 +688,21 @@ def get_all_dividends(
 
     time.sleep(0.5)
 
-    # Secondary bulk: MarketBeat (date-filtered announcements)
+    # Second comprehensive bulk: Investing.com AJAX (also covers ADRs/CEFs;
+    # amounts are net-of-fee for ADRs, so Benzinga's gross wins the merge)
+    investing_ok = False
+    try:
+        inv = scrape_investing_dividends(target_date)
+        investing_ok = len(inv) > 0
+        logger.info(f"Investing.com dividends: {len(inv)} tickers for {target_date}")
+        for sym, info in inv.items():
+            _add(sym, info.get('amount', ''), 'Investing.com')
+    except Exception as e:
+        logger.error(f"Investing.com dividends failed: {e}")
+
+    time.sleep(0.5)
+
+    # Tertiary: MarketBeat (date-filtered announcements; US equities only)
     try:
         mb = scrape_marketbeat_dividends(target_date)
         logger.info(f"MarketBeat dividends: {len(mb)} tickers for {target_date}")
@@ -654,12 +721,12 @@ def get_all_dividends(
             logger.error(f"StockAnalysis per-ticker sweep failed: {e}")
             unchecked = [t for t in tickers if _is_checkable_ticker(t)]
     elif tickers:
-        if not benzinga_ok:
-            # Bulk sweep failed — we have no comprehensive coverage. Everything
-            # is unverified; MarketBeat alone misses ADRs/CEFs.
+        if not benzinga_ok and not investing_ok:
+            # BOTH comprehensive bulk sources failed — no real sweep happened.
+            # MarketBeat alone misses ADRs/CEFs, so everything is unverified.
             logger.warning(
-                "Benzinga bulk returned nothing — no comprehensive dividend sweep ran. "
-                "All tickers reported UNCHECKED; re-run later or use --deep."
+                "Both Benzinga and Investing.com bulk returned nothing — no comprehensive "
+                "dividend sweep ran. All tickers reported UNCHECKED; re-run later or use --deep."
             )
             unchecked = [t for t in tickers if _is_checkable_ticker(t)]
         else:
