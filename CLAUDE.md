@@ -114,16 +114,28 @@ re-reads the calendars it can reach and verifies every hit against primary sourc
 4. **Verify every Python dividend hit per-ticker** — for each ticker the Python script
    reported, fetch `https://stockanalysis.com/stocks/TICKER/dividend/` and confirm the
    ex-date and amount match. (If `stocks/` 404s, try `etf/`.)
-   **ADR amount trap:** for ADRs (BABA, etc.), StockAnalysis lists the dividend NET of
-   the ~$0.02/ADS depositary fee (e.g. shows $1.030 when Alibaba declared $1.05).
-   For any ADR hit, verify the declared gross amount via the company's 6-K/press
-   release or MarketBeat — the gross is what the price drops by on ex-date, so the
-   gross is what goes in the report and GTC adjustments.
-5. **Re-check UNCHECKED tickers** — if the script reported unchecked tickers
+5. **Verify every dividend hit against the ISSUER'S OWN announcement (mandatory)** —
+   hits are rare (1–4/day), so this is cheap. For each hit, find the declaration:
+   8-K/6-K via WebSearch (`"<company> dividend declared <month year>"`) or the
+   StockTitan per-ticker news page (SEC.gov itself 403s direct fetches — use mirrors).
+   Confirm from the declaration, not the calendar:
+   - **Exact amount** (calendars round: Benzinga showed KIO $0.12, actual $0.1215)
+   - **Gross vs net (ADR trap):** StockAnalysis/Investing.com list ADR dividends NET
+     of the ~$0.02/ADS depositary fee (showed BABA $1.030 when the 6-K declared
+     $1.05). The GROSS is what the price drops by on ex-date — gross goes in the
+     report and GTC adjustments.
+   - **Cash vs STOCK dividend:** calendars don't distinguish. METCB 2026-06-12 looked
+     like a $0.14 cash dividend on Benzinga; the 8-K revealed $0.1369 paid IN CLASS B
+     SHARES. Only the filing shows this.
+   - **CEF caveat:** monthly payers (RA, KIO) declare several distributions in one
+     batch press release months ahead — absence of a FRESH filing is normal and is
+     NOT evidence against the event. The standard is any issuer communication, not a
+     same-week filing.
+6. **Re-check UNCHECKED tickers** — if the script reported unchecked tickers
    (`output/unchecked_tickers_YYYY-MM-DD.txt`), fetch those per-ticker pages
    individually if there are a handful; if there are many, re-run the script later
    instead. Do not skip this.
-6. **Spot-check known payers** — positions known to pay monthly (e.g. RA) or with
+7. **Spot-check known payers** — positions known to pay monthly (e.g. RA, KIO) or with
    recently announced events, even if nothing else flagged them.
 
 Filter all results: only keep tickers whose **underlying** matches a position.
