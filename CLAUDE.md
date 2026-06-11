@@ -90,8 +90,8 @@ tickers manually (list in `output/unchecked_tickers_YYYY-MM-DD.txt`). Never pres
 a run with unchecked tickers as a clean "no events" day.
 
 ### Step 5 — Claude's independent check
-The Python script checks 1000+ tickers individually; Claude cannot re-fetch them all.
-Claude's check is targeted:
+The Python script sweeps bulk calendars and verifies hits; Claude independently
+re-reads the calendars it can reach and verifies every hit against primary sources:
 
 1. **Splits calendars (bulk)** — fetch all three, filter to target date, match against positions:
    - `https://stockanalysis.com/actions/splits/` — missed VRNO on 2026-06-11; never rely on it alone
@@ -128,20 +128,24 @@ Claude's check is targeted:
 
 Filter all results: only keep tickers whose **underlying** matches a position.
 
-**Why dividends are per-ticker (as of 2026-06):** every bulk dividend calendar tested
+**Why these dividend sources (as of 2026-06-11):** most bulk calendars tested
 (NASDAQ API, StockAnalysis calendar, EarningsWhispers, Finviz, Yahoo, WSJ, Barchart,
-Seeking Alpha) is either broken, bot-blocked, or misses ADRs/CEFs — MarketBeat's
-calendar listed 18 tickers for 2026-06-11 but missed both BABA and RA. Per-ticker
-pages are the only source that reliably covers everything.
+Seeking Alpha) are broken, bot-blocked, or miss ADRs/CEFs. Only two are comprehensive:
+Benzinga (60 tickers for 2026-06-11 incl. BABA and RA) and Investing.com's AJAX
+endpoint (66 tickers, script-only since it requires POST). They have different blind
+spots — Investing.com uniquely covers foreign Y-suffix ADRs, Benzinga uniquely covers
+some preferreds/CEFs — so the script uses their union. StockAnalysis per-ticker pages
+are accurate but rate-capped far below portfolio scale: hit verification only.
 
 ### Step 6 — Write Claude's findings
 Write to `output/claude_results_YYYY-MM-DD.json`:
 ```json
 [
-  {"underlying": "BABA", "event_type": "dividend", "amount_or_ratio": "$1.030", "sources": ["StockAnalysis"]},
-  {"underlying": "SHPH", "event_type": "split",    "amount_or_ratio": "1 for 10", "sources": ["StockAnalysis", "NASDAQ"]}
+  {"underlying": "BABA", "event_type": "dividend", "amount_or_ratio": "$1.05", "sources": ["Benzinga", "Alibaba 6-K (gross)", "StockAnalysis"]},
+  {"underlying": "SHPH", "event_type": "split",    "amount_or_ratio": "1 for 10", "sources": ["StockAnalysis", "Benzinga", "StockTitan press release"]}
 ]
 ```
+Use declared GROSS amounts for ADRs (see the ADR amount trap in Step 5).
 Write `[]` if nothing found — this signals the check completed with no hits.
 
 ### Step 7 — Run comparison
@@ -231,7 +235,9 @@ When a position has a split or dividend ex-date tomorrow:
 ## Email Configuration
 
 Sender: `rohantatikonda@gmail.com` (Gmail app password required)
-Recipients: 5 addresses stored in `.env` as `EMAIL_RECIPIENTS` (comma-separated).
+Recipients: stored in `.env` as `EMAIL_RECIPIENTS` (comma-separated; currently one
+address — `rohan@jagtradingllc.com`. **Watch for typos**: a trailing character in
+this field silently swallowed two reports on 2026-06-10 before being caught).
 
 ### First-time setup on a new machine
 ```bash
@@ -247,7 +253,7 @@ Name it "DividendsAndStockSplits". Use the 16-character code (no spaces) as EMAI
 
 ---
 
-## Known Source Issues (as of 2026-06-10)
+## Known Source Issues (as of 2026-06-11)
 
 | Source | Status | Notes |
 |---|---|---|
@@ -306,6 +312,7 @@ DividendsAndStockSplits/
 ├── ticker_utils.py      ← Ticker parsing & underlying extraction
 ├── email_sender.py      ← SMTP email (Gmail or Outlook, auto-detected)
 ├── compare.py           ← Python vs Claude comparison
+├── test_all.py          ← Offline regression suite — run after ANY code change
 ├── requirements.txt
 ├── .env.example         ← Copy to .env and fill in credentials
 └── .env                 ← GITIGNORED — credentials only
