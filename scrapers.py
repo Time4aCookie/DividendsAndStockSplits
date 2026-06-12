@@ -153,14 +153,30 @@ _SA_SPLITS_ROW_RE = re.compile(
 )
 
 
-def scrape_stockanalysis_splits(target_date: datetime.date) -> dict[str, str]:
+def _combined_date_variants(
+    target_date: datetime.date,
+    extra_dates: list[datetime.date] | None,
+) -> list[str]:
+    """Date-string variants for the target date plus any extra dates (e.g. the
+    weekend days a Monday target skipped — a split 'effective' Saturday takes
+    effect at Monday's open and must not be missed by exact-date filtering)."""
+    variants: list[str] = []
+    for d in [target_date] + list(extra_dates or []):
+        variants.extend(_date_variants(d))
+    return variants
+
+
+def scrape_stockanalysis_splits(
+    target_date: datetime.date,
+    extra_dates: list[datetime.date] | None = None,
+) -> dict[str, str]:
     """StockAnalysis upcoming splits calendar. Returns {ticker: ratio_str}."""
     found: dict[str, str] = {}
     resp = _get('https://stockanalysis.com/actions/splits/')
     if not resp:
         return found
 
-    date_variants = _date_variants(target_date)
+    date_variants = _combined_date_variants(target_date, extra_dates)
 
     # Primary: parse SvelteKit inline JS object literal
     svelte = _get_sveltekit_script(resp.text)
@@ -193,7 +209,10 @@ def scrape_stockanalysis_splits(target_date: datetime.date) -> dict[str, str]:
     return found
 
 
-def scrape_benzinga_splits(target_date: datetime.date) -> dict[str, str]:
+def scrape_benzinga_splits(
+    target_date: datetime.date,
+    extra_dates: list[datetime.date] | None = None,
+) -> dict[str, str]:
     """
     Benzinga stock-splits calendar. Server-rendered table with explicit
     Ex-Date on every row. Covers NASDAQ, NYSE, AMEX, OTC, and BATS ETFs.
@@ -204,7 +223,8 @@ def scrape_benzinga_splits(target_date: datetime.date) -> dict[str, str]:
     if not resp:
         return found
 
-    date_mdY = target_date.strftime('%m/%d/%Y')   # Benzinga format: 06/11/2026
+    # Benzinga format: 06/11/2026. Accept target + skipped weekend dates.
+    accepted = {d.strftime('%m/%d/%Y') for d in [target_date] + list(extra_dates or [])}
     soup = BeautifulSoup(resp.text, 'html.parser')
 
     for table in soup.find_all('table'):
@@ -222,7 +242,7 @@ def scrape_benzinga_splits(target_date: datetime.date) -> dict[str, str]:
             cells = row.find_all('td')
             if len(cells) <= max(i_date, i_ticker, i_ratio):
                 continue
-            if cells[i_date].get_text(strip=True) == date_mdY:
+            if cells[i_date].get_text(strip=True) in accepted:
                 sym   = cells[i_ticker].get_text(strip=True).upper()
                 ratio = cells[i_ratio].get_text(strip=True)
                 if sym and re.match(r'^[A-Z0-9.]{1,10}$', sym):
@@ -236,7 +256,10 @@ def scrape_benzinga_splits(target_date: datetime.date) -> dict[str, str]:
 _INVESTING_TICKER_RE = re.compile(r'\(\s*([A-Z0-9.]{1,10})\s*\)')
 
 
-def scrape_investing_splits(target_date: datetime.date) -> dict[str, str]:
+def scrape_investing_splits(
+    target_date: datetime.date,
+    extra_dates: list[datetime.date] | None = None,
+) -> dict[str, str]:
     """
     Investing.com stock-split calendar. Date-grouped table: the date cell is
     filled only on the FIRST row of each date group, so we carry it forward.
@@ -247,7 +270,7 @@ def scrape_investing_splits(target_date: datetime.date) -> dict[str, str]:
     if not resp:
         return found
 
-    date_variants = _date_variants(target_date)
+    date_variants = _combined_date_variants(target_date, extra_dates)
     soup = BeautifulSoup(resp.text, 'html.parser')
 
     for table in soup.find_all('table'):
@@ -273,9 +296,14 @@ def scrape_investing_splits(target_date: datetime.date) -> dict[str, str]:
     return found
 
 
-def get_all_splits(target_date: datetime.date) -> dict[str, dict]:
+def get_all_splits(
+    target_date: datetime.date,
+    extra_dates: list[datetime.date] | None = None,
+) -> dict[str, dict]:
     """
     Aggregate splits from all sources.
+    extra_dates: non-trading dates the target skipped (weekend before a Monday
+    target) — splits 'effective' on those dates hit at the target's open.
     Returns {ticker: {'ratio': str, 'sources': [str, ...]}}.
     """
     results: dict[str, dict] = {}
@@ -286,7 +314,7 @@ def get_all_splits(target_date: datetime.date) -> dict[str, dict]:
     ]
     for name, fn in sources:
         try:
-            found = fn(target_date)
+            found = fn(target_date, extra_dates)
             logger.info(f"{name} splits: {len(found)} tickers")
             for sym, ratio in found.items():
                 if sym not in results:

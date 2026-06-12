@@ -188,8 +188,18 @@ def main() -> None:
         logger.info(f"GTC: {len(gtc_map)} unique underlying tickers")
 
     # 2. Scrape all sources
+    # Splits 'effective' on a skipped weekend day take effect at the target
+    # date's open — scan those dates too (e.g. Sat/Sun before a Monday target).
+    skipped_dates: list[datetime.date] = []
+    d = target_date - datetime.timedelta(days=1)
+    while d.weekday() >= 5:   # walk back through Sat/Sun
+        skipped_dates.append(d)
+        d -= datetime.timedelta(days=1)
+    if skipped_dates:
+        logger.info(f"Weekend dates also scanned for splits: {[str(x) for x in skipped_dates]}")
+
     logger.info("Scraping splits sources...")
-    all_splits    = get_all_splits(target_date)
+    all_splits    = get_all_splits(target_date, extra_dates=skipped_dates)
 
     logger.info("Scraping dividend sources...")
     all_dividends, unchecked_tickers = get_all_dividends(

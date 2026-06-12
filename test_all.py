@@ -246,6 +246,23 @@ INV_SPLITS = '''<table><thead><tr><th>Split date</th><th>Company</th><th>Split r
 scrapers._get = lambda url, timeout=15: FakeResp(INV_SPLITS)
 check('Investing splits: date-group carry-forward',
       scrapers.scrape_investing_splits(TARGET), {'GMM': '1:50', 'SHPH': '1:10'})
+
+# Weekend-effective splits: target Monday 6/15, split dated Saturday 6/13 must
+# be caught when the skipped weekend dates are passed as extra_dates
+MONDAY = datetime.date(2026, 6, 15)
+WEEKEND = [datetime.date(2026, 6, 14), datetime.date(2026, 6, 13)]
+BZ_WKND = '''<table><thead><tr>
+<th>Ex-Date</th><th>Company</th><th>ticker</th><th>exchange</th><th>Split Ratio</th>
+</tr></thead><tbody>
+<tr><td>06/13/2026</td><td>Weekend Corp</td><td>WKND</td><td>NASDAQ</td><td>1:10</td></tr>
+<tr><td>06/15/2026</td><td>Monday Corp</td><td>MOND</td><td>NYSE</td><td>1:5</td></tr>
+<tr><td>06/12/2026</td><td>Friday Corp</td><td>FRDY</td><td>NYSE</td><td>1:2</td></tr>
+</tbody></table>'''
+scrapers._get = lambda url, timeout=15: FakeResp(BZ_WKND)
+check('Saturday-dated split caught for Monday target (Benzinga)',
+      scrapers.scrape_benzinga_splits(MONDAY, WEEKEND), {'WKND': '1:10', 'MOND': '1:5'})
+check('without extra_dates only Monday matches',
+      scrapers.scrape_benzinga_splits(MONDAY), {'MOND': '1:5'})
 scrapers._get = _orig_get
 scrapers.time.sleep = _orig_sleep
 
