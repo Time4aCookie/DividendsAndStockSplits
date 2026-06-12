@@ -67,10 +67,14 @@ This produces:
 - `output/unchecked_tickers_YYYY-MM-DD.txt` — only if some tickers could not be verified
 
 **Modes & runtime:**
-- **Fast mode (default)** — ~1 minute. Benzinga bulk dividend calendar + Investing.com
+- **Fast mode (default)** — ~2 minutes. Benzinga bulk dividend calendar + Investing.com
   AJAX bulk (each 1 request, both cover ADRs/CEFs; Benzinga gross amounts win the
   merge) + MarketBeat (1 request) + StockAnalysis per-ticker verification of position
-  hits only. Use this for the daily check — always.
+  hits + **OTC-preferred sweep**: every position matching `^[A-Z]{4,5}P$` (OTC/illiquid
+  preferreds like PSBYP/PSBZP) is per-ticker checked because NO bulk calendar covers
+  them — both were missed on 2026-06-12 until the user caught it. Tickers with no
+  per-ticker page anywhere (e.g. SLMNP) surface as UNCHECKED for manual verification.
+  Use this for the daily check — always.
 - **Deep mode (`--deep`)** — **NOT VIABLE at this portfolio's scale (~1400 tickers).**
   Tested 2026-06-11: StockAnalysis's rate limiter has a budget far below 1400
   requests — the sweep ran 3 hours, spent ~100% of its time in 429 backoff loops,
@@ -136,7 +140,16 @@ re-reads the calendars it can reach and verifies every hit against primary sourc
    individually if there are a handful; if there are many, re-run the script later
    instead. Do not skip this.
 7. **Spot-check known payers** — positions known to pay monthly (e.g. RA, KIO) or with
-   recently announced events, even if nothing else flagged them.
+   recently announced events, even if nothing else flagged them. Known tricky positions
+   (as of 2026-06-12):
+   - **SLMNP** (LyondellBasell 6% pfd, $1000 par, $15/qtr) — NO per-ticker coverage
+     anywhere; ex-dates ~Jan/Apr/Jul/Oct 15. Verify manually near those dates.
+   - **CETXP** (Cemtrex Series 1 pfd) — pays 10% IN PREFERRED SHARES ~quarter-end
+     (Mar 31, Jun 30 records), not cash. Calendars miss it entirely.
+   - **BACPRP and other BAC preferreds** — declared in batch press releases;
+     record dates cluster in early-to-mid July/Oct/Jan/Apr.
+   - **PSBYP/PSBZP** (Link Parks OTC pfds) — record 15th of Mar/Jun/Sep/Dec;
+     only visible via StockAnalysis `quote/otc/` pages (now in the script's sweep).
 
 Filter all results: only keep tickers whose **underlying** matches a position.
 
@@ -276,7 +289,7 @@ Name it "DividendsAndStockSplits". Use the 16-character code (no spaces) as EMAI
 | StockTitan per-ticker news | ✓ Working | Split verification: `stocktitan.net/news/TICKER/` surfaces the company's own split press release (ratio + effective date). Used in Claude's Step 5, not by the script. |
 | Benzinga dividends calendar | ✓ Working | PRIMARY dividends source — one request covers the whole market incl. ADRs (BABA $1.05 gross) and CEFs (RA). Found 60 tickers for 2026-06-11 when NASDAQ API found 6 and MarketBeat 0. |
 | Investing.com dividends AJAX | ✓ Working | Second comprehensive bulk (script-only — POST endpoint, Claude's WebFetch cannot POST). Covers ADRs/CEFs incl. foreign Y-suffix ADRs Benzinga misses; Benzinga uniquely covers some preferreds/CEFs. ADR amounts NET of fees — Benzinga gross wins the merge. |
-| StockAnalysis per-ticker dividends | ⚠ Hit verification ONLY | Fine for a handful of requests (verifying hits). **Cannot sustain full-portfolio sweeps** — daily request budget is far below 1400; a 2026-06-11 sweep attempt spent 3 hours in 429 backoff and was killed. ADR amounts shown NET of depositary fee — use Benzinga/6-K gross. |
+| StockAnalysis per-ticker dividends | ⚠ Hit verification + OTC-pref sweep ONLY | Fine for a handful of requests. **Cannot sustain full-portfolio sweeps** — daily request budget is far below 1400; a 2026-06-11 sweep attempt spent 3 hours in 429 backoff and was killed. ADR amounts shown NET of depositary fee — use Benzinga/6-K gross. **OTC tickers live under `/quote/otc/TICKER/dividend/`** — `/stocks/` 404s on them (how PSBYP/PSBZP were initially missed). |
 | NASDAQ HTML splits page | ✗ JS-rendered | Raw HTML has no data rows — always returned 0. Removed 2026-06-10. |
 | MarketBeat dividends calendar | ✓ Working | Supplementary — US equities only; missed BABA and RA on 2026-06-11 |
 | NASDAQ API (splits + dividends) | ✗ Timeout | Removed |

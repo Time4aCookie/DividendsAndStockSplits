@@ -124,7 +124,49 @@ scrapers._get_perticker = _route
 results, unchecked = scrapers.scrape_stockanalysis_dividends_perticker(TARGET, ['BABA', 'AAPL', 'BLOCKED'])
 check('sweep results', results, {'BABA': {'amount': '$1.030', 'source': 'StockAnalysis'}})
 check('sweep unchecked', unchecked, ['BLOCKED'])
+
+# OTC preferreds (PSBYP/PSBZP, missed 2026-06-12): /stocks/ and /etf/ 404 but
+# /quote/otc/ has the page — the fetcher must fall through to it
+SA_OTC_HIT = '<script>__sveltekit_x = {history:[{dt:"2026-06-11",amt:"$0.325",dec:"n/a",record:"2026-06-11",pay:"2026-06-30"}]}</script>'
+def _route_otc(url, timeout=12):
+    if 'quote/otc' in url: return ('ok', FakeResp(SA_OTC_HIT))
+    return ('notfound', None)
+scrapers._get_perticker = _route_otc
+t, r, checked = scrapers._fetch_sa_dividend('PSBYP', TARGET)
+check('OTC preferred found via quote/otc fallback path',
+      (r, checked), ({'amount': '$0.325', 'source': 'StockAnalysis'}, True))
 scrapers._get_perticker = _orig_get_perticker
+
+# ===========================================================================
+print('\n=== fast-mode OTC-preferred sweep (bulk-invisible tickers) ===')
+_orig_bz  = scrapers.scrape_benzinga_dividends
+_orig_inv = scrapers.scrape_investing_dividends
+_orig_mb  = scrapers.scrape_marketbeat_dividends
+_orig_fetch = scrapers._fetch_sa_dividend
+
+scrapers.scrape_benzinga_dividends   = lambda d: {'UNH': {'amount': '$2.32', 'source': 'Benzinga'}}
+scrapers.scrape_investing_dividends  = lambda d: {}
+scrapers.scrape_marketbeat_dividends = lambda d: {}
+def _fake_fetch(sym, d):
+    if sym == 'PSBYP':
+        return sym, {'amount': '$0.325', 'source': 'StockAnalysis'}, True
+    if sym == 'NOCOVP':
+        return sym, None, False     # no page anywhere -> must surface as unchecked
+    return sym, None, True
+scrapers._fetch_sa_dividend = _fake_fetch
+
+merged, unchecked = scrapers.get_all_dividends(TARGET, tickers=['UNH', 'PSBYP', 'NOCOVP', 'CLEANP', 'BABA'])
+check('bulk hit kept', 'UNH' in merged, True)
+check('OTC-pref sweep catches PSBYP despite bulk blindness',
+      merged.get('PSBYP'), {'amount': '$0.325', 'sources': ['StockAnalysis']})
+check('non-pattern ticker BABA not swept', 'BABA' in merged, False)
+check('no-coverage preferred surfaces as UNCHECKED', unchecked, ['NOCOVP'])
+check('clean preferred not flagged', 'CLEANP' in merged, False)
+
+scrapers.scrape_benzinga_dividends   = _orig_bz
+scrapers.scrape_investing_dividends  = _orig_inv
+scrapers.scrape_marketbeat_dividends = _orig_mb
+scrapers._fetch_sa_dividend          = _orig_fetch
 
 # ===========================================================================
 print('\n=== Benzinga dividends parsing ===')

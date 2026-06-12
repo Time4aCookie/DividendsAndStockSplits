@@ -425,7 +425,10 @@ def _fetch_sa_dividend(ticker: str, target_date: datetime.date) -> tuple[str, di
     """
     time.sleep(1.2)   # 1.2s pacing — 0.8s proved too aggressive at full scale (sustained 429s)
     any_error = False
-    for path_prefix in ('stocks', 'etf'):
+    # 'quote/otc' covers OTC-traded securities (e.g. delisted-to-OTC preferreds
+    # like PSBYP/PSBZP) that /stocks/ 404s on — discovered 2026-06-12 when both
+    # were missed because every path tried returned 404.
+    for path_prefix in ('stocks', 'etf', 'quote/otc'):
         url = f'https://stockanalysis.com/{path_prefix}/{ticker.lower()}/dividend/'
         status, resp = _get_perticker(url)
         if status == 'ok':
@@ -745,5 +748,31 @@ def get_all_dividends(
                         )
                 except Exception as e:
                     logger.warning(f"  {sym}: SA verification errored ({e}) — hit stands on bulk sources")
+
+            # OTC/illiquid preferreds (5-6 letter tickers ending in P) are INVISIBLE
+            # to every bulk calendar — PSBYP/PSBZP were missed 2026-06-12 this way.
+            # Always per-ticker check them; tickers with no page anywhere are
+            # reported UNCHECKED so the gap is loud, never silent.
+            otc_pref = sorted(
+                t for t in set(tickers)
+                if re.match(r'^[A-Z]{4,5}P$', t) and _is_checkable_ticker(t) and t not in merged
+            )
+            if otc_pref:
+                logger.info(f"OTC-preferred sweep: checking {len(otc_pref)} bulk-invisible tickers...")
+                for sym in otc_pref:
+                    try:
+                        _, result, checked = _fetch_sa_dividend(sym, target_date)
+                        if result is not None:
+                            _add(sym, result.get('amount', ''), 'StockAnalysis')
+                            logger.info(f"  OTC-pref HIT: {sym} — {result.get('amount', '?')}")
+                        elif not checked:
+                            unchecked.append(sym)
+                    except Exception:
+                        unchecked.append(sym)
+                if unchecked:
+                    logger.warning(
+                        f"OTC-preferred sweep: {len(unchecked)} ticker(s) have no per-ticker "
+                        f"coverage anywhere — verify manually: {', '.join(unchecked)}"
+                    )
 
     return merged, unchecked
