@@ -148,7 +148,10 @@ def build_html_body(
         </table>
         """
     else:
-        splits_html = '<p><strong>Stock Splits:</strong> None found for tomorrow.</p>'
+        splits_html = (
+            f'<p><strong>Stock Splits:</strong> None found for '
+            f'{report_date.strftime("%A, %B %d")}.</p>'
+        )
 
     # Dividends table
     div_rows = ''
@@ -175,6 +178,9 @@ def build_html_body(
         </table>
         """
     else:
-        div_html = '<p><strong>Dividends:</strong> None found for tomorrow.</p>'
+        div_html = (
+            f'<p><strong>Dividends:</strong> None found for '
+            f'{report_date.strftime("%A, %B %d")}.</p>'
+        )
 
     return splits_html + '<br/>' + div_html
