@@ -205,17 +205,24 @@ Present a clear summary:
 ### Step 9 — Send the email
 **Always send the email**, whether or not any events were found. A "nothing found" email is expected and confirms the check ran.
 
-If there are **no discrepancies** (including the case where nothing was found): send automatically.
-```bash
-python check_events.py <positions_file>
-```
+**Do NOT use the raw `python check_events.py <positions_file>` auto-send.** In
+practice (every run 2026-06-10 onward) it would email the WRONG report: it
+includes bare-suffix/common-vs-preferred FALSE POSITIVES (ARES, CTO, ESP, PB,
+ECF) and pre-verification amounts (BABA net $1.03 vs gross $1.05, METCB cash vs
+STOCK, BST $0.25 vs $0.2579, rounded preferreds). The email must be built from
+**Claude's verified Step 5 findings**, not the script's raw output.
 
-If there are **discrepancies**: tell the user what they are, then ask:
-> "There are X discrepancies that need manual verification (listed above).
-> Do you want me to send the email now with the discrepancies flagged in red,
-> or verify first and send after?"
+**How to send:** write a short throwaway script that imports `build_html_body`
+and `send_report` from `email_sender`, passes the curated `dividends`/`splits`
+dicts (false positives removed; issuer-verified GROSS/cash-vs-stock/exact
+amounts; preferred series noted), sends, then delete the script. Keep a
+human-readable note per line (e.g. "return of capital", "paid in Class B
+shares", "Series H not common"). Mark obviously-superseded sends "CORRECTED".
 
-Only send after the user confirms in the discrepancy case.
+**Discrepancies** (there are almost always bare-suffix false positives): verify
+each against issuer/primary sources, then tell the user the verified disposition
+and ask whether to **send clean** (false positives removed — the usual choice)
+or **send flagged** (kept in red). Only send after the user confirms.
 
 ---
 
