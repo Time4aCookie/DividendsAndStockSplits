@@ -153,14 +153,16 @@ re-reads the calendars it can reach and verifies every hit against primary sourc
    - **NMKBP/NMKCP/NMPWP** (Niagara Mohawk 3.60%/3.90%/3.40% pfds, $100 par) —
      $0.90/$0.975/$0.85 quarterly, record ~16th of Mar/Jun/Sep/Dec; OTC sweep
      covers them.
-   - **ARESPB and other NYSE "PB"/"PRB"/"PRx" preferreds** — KNOWN GAP. The
-     bare-suffix logic strips ARESPB→ARES and catches the COMMON's dividend, but
-     the preferred's OWN dividend is not checked: bulk calendars list it under a
-     different format (ARES-PB) and the OTC sweep pattern `^[A-Z]{4,5}P$` doesn't
-     match a trailing PB/PRB. StockAnalysis `/stocks/arespb/` 404s (real path is
-     `ares-pb`-style, needs translation). Until fixed, a hit on the stripped
-     common for one of these positions is a FALSE POSITIVE for the preferred —
-     and the preferred's real ex-date may be missed. Verify these manually near
+   - **Dotted/dashed series preferreds** (`SPG.PRJ`, `BAC.PRO`, `DLR.PRJ`, …) —
+     now handled: kept as preferreds and per-ticker checked via their dotted
+     StockAnalysis slug (`/stocks/spg.prj/`). 57 such positions were silently
+     dropped before 2026-06-16 (parser ignored `.PR` notation and series past H).
+   - **ARESPB and other BARE PB/PRB preferreds (no separator)** — STILL A GAP.
+     The bare-suffix logic strips ARESPB→ARES and catches the COMMON's dividend,
+     but the preferred's OWN dividend isn't checked: the bare PB/PRB form isn't
+     in the preferred sweep pattern and `/stocks/arespb/` 404s (real slug is
+     `ares-pb`-style, needs translation). A stripped-common hit for such a
+     position is a FALSE POSITIVE for the preferred; verify manually near
      quarter-end. (ARES Series B: record ~15th of Mar/Jun/Sep/Dec.)
 
 Filter all results: only keep tickers whose **underlying** matches a position.
@@ -228,7 +230,7 @@ Apply in this order — first match wins:
 | Space share class | `WSO B` | Convert to dot form: `WSO.B` |
 | Warrant (separator) | `ACMR.WS`, `ACMR.WT`, `ACMR.W` | Strip suffix — unambiguous |
 | Right / Unit (separator) | `ACMR.R`, `ACMR.U` | Strip suffix — unambiguous |
-| Preferred (separator) | `BAC.PA`, `BAC-PA` | Strip suffix; check underlying `BAC` |
+| Preferred (separator) | `BAC.PA`, `BAC-PA`, `SPG.PRJ`, `BAC.PRO` | Both `.P{x}` and `.PR{x}` notations, series A–Z. KEEP the preferred's own identity (normalize dash→dot), do NOT collapse to the common — the script per-ticker checks the preferred itself. (`.PRx`/beyond-H series were silently dropped pre-2026-06-16.) |
 | Share class | `BRK.A`, `BRK-B` | Keep full ticker (normalize dash to dot: `BRK.B`) |
 | **Bare suffix — AMBIGUOUS** | `ACMRW`, `BACPA`, `BACPRA`, `GLW`, `AMPG` | Check **BOTH** the full ticker AND the stripped form |
 | Common stock | `AAPL`, `BABA`, `RA` | No change |

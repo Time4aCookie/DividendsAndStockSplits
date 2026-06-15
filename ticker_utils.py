@@ -35,20 +35,27 @@ HUMAN_OPTION_RE = re.compile(
 # Space-separated share class: "WSO B" -> WSO.B (StockAnalysis/MarketBeat use dot form)
 SPACE_CLASS_RE = re.compile(r'^([A-Z][A-Z0-9]{0,5})\s+([A-C])$')
 
-# Unambiguous suffixes (dot/dash separator present) — strip with confidence
-DOTDASH_PREFERRED = [
-    '.PA', '.PB', '.PC', '.PD', '.PE', '.PF', '.PG', '.PH',
-    '-PA', '-PB', '-PC', '-PD', '-PE', '-PF', '-PG', '-PH',
-]
+# Unambiguous preferred (dot/dash separator present) — strip with confidence.
+# Covers BOTH notations and the FULL series range A-Z:
+#   .PA / -PA  ("P" + letter)        e.g. BAC.PA
+#   .PRA / -PRA ("PR" + letter)      e.g. SPG.PRJ, DLR.PRJ, BML.PRJ (Series J!)
+# The series letter goes A-Z — preferreds routinely run past H (Series I/J/K/...).
+# Earlier this only listed .PA-.PH/-PA-.PH, so SPG.PRJ fell through to 'common'
+# as the literal "SPG.PRJ" and matched no calendar (caught by user 2026-06-16).
+_DOTDASH_PREF_RE = re.compile(r'^(?P<base>[A-Z0-9]+)[.\-]PR?[A-Z]$')
+
 DOTDASH_WARRANT = ['.WS', '.WT', '.W']
 DOTDASH_RIGHT   = ['.R']
 DOTDASH_UNIT    = ['.U']
 # Share class suffixes — the full ticker IS the security; normalize dash to dot
 DOTDASH_CLASS   = ['.A', '.B', '.C', '-A', '-B', '-C']
 
-# Ambiguous bare suffixes (no separator) — produce BOTH candidates
-BARE_PREFERRED = ['PRA', 'PRB', 'PRC', 'PRD', 'PRE', 'PRF', 'PRG', 'PRH',
-                  'PA', 'PB', 'PC', 'PD', 'PE', 'PF', 'PG', 'PH']
+# Ambiguous bare suffixes (no separator) — produce BOTH candidates.
+# The "PR"+letter infix is a strong preferred signal, so cover the full A-Z
+# range; bare single-letter "P"+letter is a weaker signal, kept narrow (A-H)
+# to limit false strips of ordinary tickers that happen to end in those letters.
+BARE_PREFERRED = ['PR' + c for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'] + \
+                 ['PA', 'PB', 'PC', 'PD', 'PE', 'PF', 'PG', 'PH']
 BARE_WARRANT   = ['W']
 BARE_RIGHT     = ['R']
 BARE_UNIT      = ['U']
@@ -88,10 +95,14 @@ def get_underlying_candidates(ticker: str) -> list[tuple[str, str]]:
     if m:
         return [(f'{m.group(1)}.{m.group(2)}', 'class_share')]
 
-    # Unambiguous dot/dash suffixes — strip and return single candidate
-    for suf in DOTDASH_PREFERRED:
-        if t.endswith(suf) and len(t) > len(suf):
-            return [(t[: -len(suf)], 'preferred')]
+    # Unambiguous dot/dash preferred — KEEP the preferred's own identity
+    # (normalize dash->dot), do NOT collapse to the common. A preferred holder's
+    # dividend is the PREFERRED's, not the common's; collapsing SPG.PRJ->SPG
+    # would check the wrong security and false-positive on every common payout.
+    # The script per-ticker checks these via their own StockAnalysis page.
+    m = _DOTDASH_PREF_RE.match(t)
+    if m:
+        return [(t.replace('-', '.'), 'preferred')]
     for suf in DOTDASH_WARRANT:
         if t.endswith(suf) and len(t) > len(suf):
             return [(t[: -len(suf)], 'warrant')]

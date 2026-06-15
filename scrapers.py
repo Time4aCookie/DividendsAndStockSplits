@@ -25,6 +25,12 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+# Preferred tickers to per-ticker check (bulk calendars miss/mishandle them):
+#   ^[A-Z]{4,5}P$        bare OTC/illiquid preferreds (PSBYP, NMKBP, NMPWP)
+#   ^[A-Z0-9]+\.PR?[A-Z]$ dotted series preferreds (SPG.PRJ, BAC.PRO, DLR.PRJ)
+# Dashed forms are normalized to dotted upstream in ticker_utils.
+_PREF_SWEEP_RE = re.compile(r'^[A-Z]{4,5}P$|^[A-Z0-9]+\.PR?[A-Z]$')
+
 HEADERS = {
     'User-Agent': (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -809,29 +815,31 @@ def get_all_dividends(
                 except Exception as e:
                     logger.warning(f"  {sym}: SA verification errored ({e}) — hit stands on bulk sources")
 
-            # OTC/illiquid preferreds (5-6 letter tickers ending in P) are INVISIBLE
-            # to every bulk calendar — PSBYP/PSBZP were missed 2026-06-12 this way.
-            # Always per-ticker check them; tickers with no page anywhere are
-            # reported UNCHECKED so the gap is loud, never silent.
-            otc_pref = sorted(
+            # Preferreds are INVISIBLE to / mishandled by every bulk calendar, so
+            # per-ticker check each one. Two families:
+            #   - bare OTC/illiquid preferreds: ^[A-Z]{4,5}P$  (PSBYP/PSBZP, missed 2026-06-12)
+            #   - dotted/dashed series preferreds: SPG.PRJ, BAC.PRO  (SPG.PRJ missed 2026-06-16)
+            # StockAnalysis serves dotted preferreds at /stocks/spg.prj/. Tickers
+            # with no page anywhere are reported UNCHECKED — never silently clean.
+            pref_sweep = sorted(
                 t for t in set(tickers)
-                if re.match(r'^[A-Z]{4,5}P$', t) and _is_checkable_ticker(t) and t not in merged
+                if _PREF_SWEEP_RE.match(t) and _is_checkable_ticker(t) and t not in merged
             )
-            if otc_pref:
-                logger.info(f"OTC-preferred sweep: checking {len(otc_pref)} bulk-invisible tickers...")
-                for sym in otc_pref:
+            if pref_sweep:
+                logger.info(f"Preferred sweep: checking {len(pref_sweep)} bulk-invisible preferreds...")
+                for sym in pref_sweep:
                     try:
                         _, result, checked = _fetch_sa_dividend(sym, target_date, require_history=True)
                         if result is not None:
                             _add(sym, result.get('amount', ''), 'StockAnalysis')
-                            logger.info(f"  OTC-pref HIT: {sym} — {result.get('amount', '?')}")
+                            logger.info(f"  Preferred HIT: {sym} — {result.get('amount', '?')}")
                         elif not checked:
                             unchecked.append(sym)
                     except Exception:
                         unchecked.append(sym)
                 if unchecked:
                     logger.warning(
-                        f"OTC-preferred sweep: {len(unchecked)} ticker(s) have no per-ticker "
+                        f"Preferred sweep: {len(unchecked)} ticker(s) have no per-ticker "
                         f"coverage anywhere — verify manually: {', '.join(unchecked)}"
                     )
 

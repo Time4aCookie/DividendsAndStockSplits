@@ -47,10 +47,18 @@ check('CTOR -> both (Citius Oncology vs CTO right)',
       get_underlying_candidates('CTOR'), [('CTOR', 'common'), ('CTO', 'right')])
 check('ACMR.WS -> unambiguous warrant',
       get_underlying_candidates('ACMR.WS'), [('ACMR', 'warrant')])
-check('BAC-PA -> unambiguous preferred',
-      get_underlying_candidates('BAC-PA'), [('BAC', 'preferred')])
-check('BACPRA -> both (bare preferred)',
+check('BAC-PA -> preferred, keeps own identity (dash->dot), NOT collapsed to BAC',
+      get_underlying_candidates('BAC-PA'), [('BAC.PA', 'preferred')])
+check('SPG.PRJ -> preferred Series J (the 2026-06-16 miss; .PR + beyond-H series)',
+      get_underlying_candidates('SPG.PRJ'), [('SPG.PRJ', 'preferred')])
+check('DLR-PRJ -> dash normalized to dot, kept as preferred',
+      get_underlying_candidates('DLR-PRJ'), [('DLR.PRJ', 'preferred')])
+check('BAC.PRO -> preferred (series O, well beyond old A-H cap)',
+      get_underlying_candidates('BAC.PRO'), [('BAC.PRO', 'preferred')])
+check('BACPRA -> both (bare preferred, still ambiguous)',
       get_underlying_candidates('BACPRA'), [('BACPRA', 'common'), ('BAC', 'preferred')])
+check('BRK.A still a class share, not mistaken for preferred',
+      get_underlying_candidates('BRK.A'), [('BRK.A', 'class_share')])
 check('BRK.A kept as class share',
       get_underlying_candidates('BRK.A'), [('BRK.A', 'class_share')])
 check('BRK-B normalized to dot',
@@ -170,15 +178,20 @@ scrapers.scrape_marketbeat_dividends = lambda d: {}
 def _fake_fetch(sym, d, require_history=False):
     if sym == 'PSBYP':
         return sym, {'amount': '$0.325', 'source': 'StockAnalysis'}, True
+    if sym == 'SPG.PRJ':
+        return sym, {'amount': '$1.04688', 'source': 'StockAnalysis'}, True
     if sym == 'NOCOVP':
         return sym, None, False     # no page anywhere -> must surface as unchecked
     return sym, None, True
 scrapers._fetch_sa_dividend = _fake_fetch
 
-merged, unchecked = scrapers.get_all_dividends(TARGET, tickers=['UNH', 'PSBYP', 'NOCOVP', 'CLEANP', 'BABA'])
+merged, unchecked = scrapers.get_all_dividends(
+    TARGET, tickers=['UNH', 'PSBYP', 'SPG.PRJ', 'NOCOVP', 'CLEANP', 'BABA'])
 check('bulk hit kept', 'UNH' in merged, True)
 check('OTC-pref sweep catches PSBYP despite bulk blindness',
       merged.get('PSBYP'), {'amount': '$0.325', 'sources': ['StockAnalysis']})
+check('dotted preferred SPG.PRJ swept (the 2026-06-16 miss)',
+      merged.get('SPG.PRJ'), {'amount': '$1.04688', 'sources': ['StockAnalysis']})
 check('non-pattern ticker BABA not swept', 'BABA' in merged, False)
 check('no-coverage preferred surfaces as UNCHECKED', unchecked, ['NOCOVP'])
 check('clean preferred not flagged', 'CLEANP' in merged, False)
