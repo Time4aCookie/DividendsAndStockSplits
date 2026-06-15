@@ -150,6 +150,18 @@ re-reads the calendars it can reach and verifies every hit against primary sourc
      record dates cluster in early-to-mid July/Oct/Jan/Apr.
    - **PSBYP/PSBZP** (Link Parks OTC pfds) — record 15th of Mar/Jun/Sep/Dec;
      only visible via StockAnalysis `quote/otc/` pages (now in the script's sweep).
+   - **NMKBP/NMKCP/NMPWP** (Niagara Mohawk 3.60%/3.90%/3.40% pfds, $100 par) —
+     $0.90/$0.975/$0.85 quarterly, record ~16th of Mar/Jun/Sep/Dec; OTC sweep
+     covers them.
+   - **ARESPB and other NYSE "PB"/"PRB"/"PRx" preferreds** — KNOWN GAP. The
+     bare-suffix logic strips ARESPB→ARES and catches the COMMON's dividend, but
+     the preferred's OWN dividend is not checked: bulk calendars list it under a
+     different format (ARES-PB) and the OTC sweep pattern `^[A-Z]{4,5}P$` doesn't
+     match a trailing PB/PRB. StockAnalysis `/stocks/arespb/` 404s (real path is
+     `ares-pb`-style, needs translation). Until fixed, a hit on the stripped
+     common for one of these positions is a FALSE POSITIVE for the preferred —
+     and the preferred's real ex-date may be missed. Verify these manually near
+     quarter-end. (ARES Series B: record ~15th of Mar/Jun/Sep/Dec.)
 
 Filter all results: only keep tickers whose **underlying** matches a position.
 
@@ -289,7 +301,7 @@ Name it "DividendsAndStockSplits". Use the 16-character code (no spaces) as EMAI
 | StockTitan per-ticker news | ✓ Working | Split verification: `stocktitan.net/news/TICKER/` surfaces the company's own split press release (ratio + effective date). Used in Claude's Step 5, not by the script. |
 | Benzinga dividends calendar | ✓ Working | PRIMARY dividends source — one request covers the whole market incl. ADRs (BABA $1.05 gross) and CEFs (RA). Found 60 tickers for 2026-06-11 when NASDAQ API found 6 and MarketBeat 0. |
 | Investing.com dividends AJAX | ✓ Working | Second comprehensive bulk (script-only — POST endpoint, Claude's WebFetch cannot POST). Covers ADRs/CEFs incl. foreign Y-suffix ADRs Benzinga misses; Benzinga uniquely covers some preferreds/CEFs. ADR amounts NET of fees — Benzinga gross wins the merge. |
-| StockAnalysis per-ticker dividends | ⚠ Hit verification + OTC-pref sweep ONLY | Fine for a handful of requests. **Cannot sustain full-portfolio sweeps** — daily request budget is far below 1400; a 2026-06-11 sweep attempt spent 3 hours in 429 backoff and was killed. ADR amounts shown NET of depositary fee — use Benzinga/6-K gross. **OTC tickers live under `/quote/otc/TICKER/dividend/`** — `/stocks/` 404s on them (how PSBYP/PSBZP were initially missed). |
+| StockAnalysis per-ticker dividends | ⚠ Hit verification + OTC-pref sweep ONLY | Fine for a handful of requests. **Cannot sustain full-portfolio sweeps** — daily request budget is far below 1400; a 2026-06-11 sweep attempt spent 3 hours in 429 backoff and was killed. ADR amounts shown NET of depositary fee — use Benzinga/6-K gross. **OTC tickers live under `/quote/otc/TICKER/dividend/`** — `/stocks/` 404s on them (how PSBYP/PSBZP were initially missed). **Silent-200 guard:** a flaky HTTP-200 with no history rows once dropped NMPWP (2026-06-16) with no error; the OTC sweep now treats a 200-without-history as UNCHECKED, not "no event". |
 | NASDAQ HTML splits page | ✗ JS-rendered | Raw HTML has no data rows — always returned 0. Removed 2026-06-10. |
 | MarketBeat dividends calendar | ✓ Working | Supplementary — US equities only; missed BABA and RA on 2026-06-11 |
 | NASDAQ API (splits + dividends) | ✗ Timeout | Removed |

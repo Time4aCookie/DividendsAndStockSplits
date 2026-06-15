@@ -135,6 +135,26 @@ scrapers._get_perticker = _route_otc
 t, r, checked = scrapers._fetch_sa_dividend('PSBYP', TARGET)
 check('OTC preferred found via quote/otc fallback path',
       (r, checked), ({'amount': '$0.325', 'source': 'StockAnalysis'}, True))
+
+# Silent-miss guard (NMPWP 2026-06-16): a 200 page with NO history rows must
+# NOT be read as "no event" for a known payer — it's UNCHECKED.
+SA_EMPTY_200 = '<html><body><div>Temporarily unavailable</div></body></html>'
+def _route_empty(url, timeout=12):
+    return ('ok', FakeResp(SA_EMPTY_200))
+scrapers._get_perticker = _route_empty
+# Default (hit-verification) trusts the 200 as a definitive no-event
+t, r, checked = scrapers._fetch_sa_dividend('NMPWP', TARGET)
+check('empty 200, require_history=False -> checked no-event', (r, checked), (None, True))
+# Known-payer sweep must treat empty 200 as UNCHECKED, not silent clean
+t, r, checked = scrapers._fetch_sa_dividend('NMPWP', TARGET, require_history=True)
+check('empty 200, require_history=True -> UNCHECKED', (r, checked), (None, False))
+# A real page with history but no target-date match is still a confident no-event
+def _route_realmiss(url, timeout=12):
+    return ('ok', FakeResp(SA_MISS))
+scrapers._get_perticker = _route_realmiss
+t, r, checked = scrapers._fetch_sa_dividend('NMPWP', TARGET, require_history=True)
+check('real page, no target match, require_history=True -> confident no-event',
+      (r, checked), (None, True))
 scrapers._get_perticker = _orig_get_perticker
 
 # ===========================================================================
@@ -147,7 +167,7 @@ _orig_fetch = scrapers._fetch_sa_dividend
 scrapers.scrape_benzinga_dividends   = lambda d: {'UNH': {'amount': '$2.32', 'source': 'Benzinga'}}
 scrapers.scrape_investing_dividends  = lambda d: {}
 scrapers.scrape_marketbeat_dividends = lambda d: {}
-def _fake_fetch(sym, d):
+def _fake_fetch(sym, d, require_history=False):
     if sym == 'PSBYP':
         return sym, {'amount': '$0.325', 'source': 'StockAnalysis'}, True
     if sym == 'NOCOVP':

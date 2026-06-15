@@ -395,6 +395,29 @@ def _parse_sa_dividend_page(html: str, target_date: datetime.date) -> dict | Non
     return None
 
 
+def _sa_page_has_any_dividend_history(html: str) -> bool:
+    """
+    True if the page contains at least one dividend-history entry (of ANY date).
+
+    A real StockAnalysis dividend page for a paying security always has history
+    rows. A degraded/partial/soft-error response served with HTTP 200 has none.
+    For known dividend payers (the OTC-preferred sweep), "200 but zero history"
+    must be treated as UNCHECKED, not as a confident "no dividend" — otherwise a
+    flaky 200 silently drops a real event (NMPWP, 2026-06-16: missed on one run,
+    found on the next, with no error logged).
+    """
+    svelte = _get_sveltekit_script(html)
+    if svelte and _SA_DIV_HIST_RE.search(svelte):
+        return True
+    # HTML table fallback: any row whose first cell parses as a date-ish string
+    soup = BeautifulSoup(html, 'html.parser')
+    for row in soup.select('table tbody tr'):
+        cells = row.find_all('td')
+        if len(cells) >= 2 and re.search(r'\d{4}|\d{1,2}/\d{1,2}', cells[0].get_text(strip=True)):
+            return True
+    return False
+
+
 def _search_dividend_in_json(obj, date_variants: set, depth: int = 0) -> str | None:
     """
     Recursively search a JSON structure for a dividend record whose ex-date
@@ -440,28 +463,37 @@ def _is_checkable_ticker(t: str) -> bool:
     return True
 
 
-def _fetch_sa_dividend(ticker: str, target_date: datetime.date) -> tuple[str, dict | None, bool]:
+def _fetch_sa_dividend(
+    ticker: str,
+    target_date: datetime.date,
+    require_history: bool = False,
+) -> tuple[str, dict | None, bool]:
     """
     Fetch StockAnalysis per-ticker dividend page.
-    Tries /stocks/TICKER/ first; if that 404s, tries /etf/TICKER/.
+    Tries /stocks/, then /etf/, then /quote/otc/ (the last covers OTC-traded
+    securities like PSBYP/PSBZP that /stocks/ 404s on).
 
     Returns (ticker, result, checked):
       result  — {'amount', 'source'} if the ticker has an ex-date on target_date, else None
-      checked — True if we got a definitive answer (page parsed, or 404 on both
-                paths). False if any request errored — the ticker is UNCHECKED
-                and must be reported as such, never treated as "no event".
+      checked — True if we got a definitive answer. False if any request errored,
+                OR (when require_history=True) the page loaded but contained zero
+                dividend-history rows — a degraded HTTP-200 that must NOT be read
+                as "no event". The ticker is then UNCHECKED, never silently clean.
+
+    require_history: set True for known dividend payers (the OTC-preferred sweep)
+      so a flaky empty 200 surfaces as unchecked instead of a silent miss.
     """
     time.sleep(1.2)   # 1.2s pacing — 0.8s proved too aggressive at full scale (sustained 429s)
     any_error = False
-    # 'quote/otc' covers OTC-traded securities (e.g. delisted-to-OTC preferreds
-    # like PSBYP/PSBZP) that /stocks/ 404s on — discovered 2026-06-12 when both
-    # were missed because every path tried returned 404.
     for path_prefix in ('stocks', 'etf', 'quote/otc'):
         url = f'https://stockanalysis.com/{path_prefix}/{ticker.lower()}/dividend/'
         status, resp = _get_perticker(url)
         if status == 'ok':
-            # Page loaded — definitive answer; don't try the other prefix
-            return ticker, _parse_sa_dividend_page(resp.text, target_date), True
+            result = _parse_sa_dividend_page(resp.text, target_date)
+            if result is None and require_history and not _sa_page_has_any_dividend_history(resp.text):
+                # 200 but no history at all — can't trust "no event" for a payer
+                return ticker, None, False
+            return ticker, result, True
         if status == 'error':
             any_error = True
         # 'notfound' — try the other prefix
@@ -789,7 +821,7 @@ def get_all_dividends(
                 logger.info(f"OTC-preferred sweep: checking {len(otc_pref)} bulk-invisible tickers...")
                 for sym in otc_pref:
                     try:
-                        _, result, checked = _fetch_sa_dividend(sym, target_date)
+                        _, result, checked = _fetch_sa_dividend(sym, target_date, require_history=True)
                         if result is not None:
                             _add(sym, result.get('amount', ''), 'StockAnalysis')
                             logger.info(f"  OTC-pref HIT: {sym} — {result.get('amount', '?')}")
