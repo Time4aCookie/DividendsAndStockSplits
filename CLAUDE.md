@@ -135,6 +135,14 @@ re-reads the calendars it can reach and verifies every hit against primary sourc
      batch press release months ahead — absence of a FRESH filing is normal and is
      NOT evidence against the event. The standard is any issuer communication, not a
      same-week filing.
+   - **Special STOCK dividends + due-bill timing:** large special dividends (incl.
+     stock/spin-style ones) go ex AFTER the payable date via the "due-bill"
+     mechanism — the ex-date is NOT before the record date. LILA/LILAB/LILAK
+     2026-06-17: record Jun 1, distribution Jun 16, EX Jun 17 (1 Series A pref
+     share per 10 common). No cash calendar lists these. **Heuristic:** if the
+     portfolio holds a WHEN-ISSUED ticker (suffix `WI`/`V`, or a sibling like
+     LILAV/LILPV next to LILA), a corporate action is in progress on that
+     underlying — investigate its 8-K for ex-date and terms.
 6. **Re-check UNCHECKED tickers** — if the script reported unchecked tickers
    (`output/unchecked_tickers_YYYY-MM-DD.txt`), fetch those per-ticker pages
    individually if there are a handful; if there are many, re-run the script later
