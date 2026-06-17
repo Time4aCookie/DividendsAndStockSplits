@@ -314,6 +314,30 @@ check('python-only flagged', any('PYTHON ONLY: CTO' in d for d in disc), True)
 check('claude-only flagged', any('CLAUDE ONLY: RA' in d for d in disc), True)
 
 # ===========================================================================
+print('\n=== GTC matching & adjustment (offline, synthetic orders) ===')
+from check_events import match_gtc_to_events, _parse_cash_amount, _split_factor
+
+check('parse $1.05', _parse_cash_amount('$1.05'), 1.05)
+check('parse net-noted amount', _parse_cash_amount('$0.0537 (Clough)'), 0.0537)
+check('reverse split factor 1 for 10', _split_factor('1 for 10'), 10.0)
+check('forward split factor 4:1', _split_factor('4:1'), 0.25)
+check('unparseable ratio -> None', _split_factor('see filing'), None)
+
+GTC = {
+    'INPAP': [{'trader': 'ALEX', 'ticker': 'INPAP', 'shares': 50.0, 'side': 'Buy', 'price': 64.01},
+              {'trader': 'ALEX', 'ticker': 'INPAP', 'shares': 0.0,  'side': 'Buy', 'price': 0.01}],
+    'PUCKU': [{'trader': 'CRAIG', 'ticker': 'PUCKU', 'shares': 100.0, 'side': 'Sell Auto', 'price': 12.99}],
+}
+recs = match_gtc_to_events({'PUCKU': {'ratio': '1 for 10'}}, {'INPAP': {'amount': '$0.50'}}, GTC)
+by = {r['underlying']: r for r in recs}
+check('dividend match present', 'INPAP' in by, True)
+check('dividend limit dropped by amount', by['INPAP']['orders'][0]['suggested_price'], 63.51)
+check('0-share order carried, no suggestion', by['INPAP']['orders'][1]['suggested_price'], None)
+check('split price x10', by['PUCKU']['orders'][0]['suggested_price'], 129.9)
+check('split shares /10', by['PUCKU']['orders'][0]['suggested_shares'], 10.0)
+check('event with no GTC order omitted',
+      [r for r in match_gtc_to_events({}, {'ZZZZ': {'amount': '$1'}}, GTC)], [])
+
 print('\n=== next_trading_day ===')
 from check_events import next_trading_day
 check('Wed -> Thu', next_trading_day(datetime.date(2026, 6, 10)), datetime.date(2026, 6, 11))

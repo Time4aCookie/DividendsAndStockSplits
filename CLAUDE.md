@@ -27,10 +27,18 @@ in the terminal.** Claude runs all scripts directly.
 ls *.xlsx 2>/dev/null; ls *.xls 2>/dev/null
 ```
 - The **positions file** matches: `position*.xlsx`, `holding*.xlsx`, `trades*.xlsx`,
-  or is the only `.xlsx` present.
-- The **GTC file** matches: `gtc*.xlsx`, `order*.xlsx`.
+  or is the only `.xlsx` present. Ticker column confirmed each run (`symbol`/`Symbol`).
 - If multiple ambiguous files exist, show the list and ask the user which is which.
 - If no file is found, tell the user to drop the Excel into this folder and try again.
+
+**GTC order books are separate** — read automatically by the script, not dropped
+in this folder. They live in a OneDrive-synced folder and are updated IN PLACE
+each morning (so re-reading the same paths daily picks up fresh content):
+`C:\Users\Rohan\Jag Trading LLC\Jag Share - JAG Drive\brad new york`
+Three trader books (ALEX, CRAIG, JOSH), matched by filename signature, newest
+matching file per trader (robust to occasional re-dated filenames). They are
+old-format `.xls` (needs `xlrd`); orders are on the `Ready_for_Sale` sheet. The
+script warns if a trader's newest file is >4 days old (possible stale/missed update).
 
 ### Step 2 — Inspect the positions file and confirm the ticker column
 ```bash
@@ -269,20 +277,30 @@ When in doubt, err on the side of checking — a false positive is cheaper than 
 
 ## GTC Order Adjustment Logic
 
-> **Note:** GTC export format is being confirmed. This section will be updated once the
-> broker export is shared.
+The script reads the three trader books (see Step 1), parses `Ready_for_Sale`
+(`gtc_reader.py`), matches resting orders to tomorrow's events via the same
+underlying parser, and writes `output/gtc_matches_YYYY-MM-DD.json` plus a console
+section. **Fold GTC matches into the curated email**, lead line obvious:
+"You have GTC orders in TICKER" — then the per-order detail (trader, side, qty,
+current limit → suggested limit).
 
-When a position has a split or dividend ex-date tomorrow:
+`Ready_for_Sale` layout (stable across all three books): header on the THIRD row
+(index 2); `Ticker` col, `Side` (`Buy`/`Sell Auto`), `Shares`, and the limit
+`Price` (the `Price` column right after `Price Type` — there are FOUR `Price`
+columns: Last/Bid/Ask/limit, so address by position not name). Orders are
+laddered (same ticker, many price levels). 0-share rows are saved placeholders —
+INCLUDE them with a `(0 shares — placeholder)` note but no adjustment math.
 
-**Dividends:**
-- Flag any open BUY limit orders — the stock opens ~`dividend_amount` lower on ex-date.
-  Suggest adjusting the limit down by the dividend amount.
-- Flag open SELL limit orders for the same reason.
+**Adjustment math** (the script computes these):
+- **Dividend:** stock opens ~`amount` lower on ex-date → suggested limit =
+  `limit − amount`, for BOTH Buy and Sell-Auto orders.
+- **Split:** suggested limit = `limit × (B/A)` and qty = `shares ÷ (B/A)` for an
+  "A for B" ratio (reverse "1 for 10" → ×10 price, ÷10 shares). Some brokers
+  auto-adjust splits — tell the user to confirm with their broker.
+- Special/STOCK dividends (no clean cash number) get no auto-math — note the
+  terms and tell the user to adjust manually.
 
-**Stock Splits:**
-- Flag ALL open orders on the underlying.
-  Price ÷ split ratio, quantity × split ratio.
-  Some brokers auto-adjust for splits — note this and tell the user to confirm with their broker.
+Label every affected order with its **trader** (ALEX/CRAIG/JOSH) so the owner can act.
 
 ---
 
@@ -338,6 +356,7 @@ Name it "DividendsAndStockSplits". Use the 16-character code (no spaces) as EMAI
 | `output/python_results_YYYY-MM-DD.csv` | Python findings — attached to email |
 | `output/python_results_YYYY-MM-DD.json` | Python findings in JSON — used for comparison |
 | `output/claude_results_YYYY-MM-DD.json` | Claude's findings — written in Step 6 |
+| `output/gtc_matches_YYYY-MM-DD.json` | GTC orders affected by tomorrow's events (per trader, with suggested adjustments) |
 | `output/unchecked_tickers_YYYY-MM-DD.txt` | Tickers the script could NOT verify (rate limit/errors) — only written when non-empty. Presence means the report is incomplete. |
 
 The `output/` directory and all `.xlsx` files are gitignored.
@@ -365,6 +384,7 @@ DividendsAndStockSplits/
 ├── check_events.py      ← Main script (Claude runs this, not the user)
 ├── scrapers.py          ← All web scraping logic
 ├── ticker_utils.py      ← Ticker parsing & underlying extraction
+├── gtc_reader.py        ← Reads the 3 trader GTC books (.xls Ready_for_Sale)
 ├── email_sender.py      ← SMTP email (Gmail or Outlook, auto-detected)
 ├── compare.py           ← Python vs Claude comparison
 ├── test_all.py          ← Offline regression suite — run after ANY code change

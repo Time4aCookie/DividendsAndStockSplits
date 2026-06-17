@@ -22,9 +22,11 @@ from dotenv import load_dotenv
 load_dotenv()  # must run before email_sender is imported (it reads env vars at module level)
 
 import pandas as pd
+import re
 from ticker_utils import build_ticker_map, get_underlying
 from scrapers import get_all_splits, get_all_dividends
 from email_sender import send_report, build_html_body
+from gtc_reader import build_gtc_map
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(message)s',
@@ -153,6 +155,108 @@ def print_summary(
 
 
 # ---------------------------------------------------------------------------
+# GTC order matching & adjustment
+# ---------------------------------------------------------------------------
+
+def _parse_cash_amount(s: str) -> float | None:
+    """Extract a leading dollar figure from an amount string ('$1.05' -> 1.05).
+    Returns None for stock/special dividends with no clean cash number."""
+    m = re.search(r'\$?\s*([0-9]+\.[0-9]+|[0-9]+)', str(s))
+    return float(m.group(1)) if m else None
+
+
+def _split_factor(ratio: str) -> float | None:
+    """Return new_price/old_price factor for a split ratio string.
+    '1 for 10' (reverse) -> 10.0 ; '10:1' / '3 for 1' (forward) -> <1.
+    Price is multiplied by this factor; share qty divided by it."""
+    m = re.search(r'(\d+(?:\.\d+)?)\s*(?:for|:|/)\s*(\d+(?:\.\d+)?)', str(ratio), re.I)
+    if not m:
+        return None
+    a, b = float(m.group(1)), float(m.group(2))
+    if a == 0:
+        return None
+    # "A for B" means B old shares -> A new shares; price scales by B/A.
+    return b / a
+
+
+def match_gtc_to_events(
+    position_splits: dict[str, dict],
+    position_dividends: dict[str, dict],
+    gtc_map: dict[str, list[dict]],
+) -> list[dict]:
+    """
+    For each event on an underlying that has resting GTC orders, return a record
+    with the affected orders (per trader) and a suggested adjusted limit price.
+
+    Dividend: stock opens ~amount lower on ex-date, so suggested = limit - amount
+              (both Buy and Sell limits move down by the dividend).
+    Split:    suggested = limit x factor, suggested_shares = shares / factor.
+    """
+    records: list[dict] = []
+
+    def orders_for(underlying: str) -> list[dict]:
+        return gtc_map.get(underlying, [])
+
+    for underlying, info in sorted(position_dividends.items()):
+        orders = orders_for(underlying)
+        if not orders:
+            continue
+        amount = _parse_cash_amount(info.get('amount', ''))
+        adj = []
+        for o in orders:
+            sugg = (round(o['price'] - amount, 4)
+                    if amount is not None and o.get('price') is not None and o['shares'] > 0
+                    else None)
+            adj.append({**o, 'suggested_price': sugg})
+        records.append({
+            'underlying': underlying, 'event_type': 'dividend',
+            'amount_or_ratio': info.get('amount', ''),
+            'cash_amount': amount, 'orders': adj,
+        })
+
+    for underlying, info in sorted(position_splits.items()):
+        orders = orders_for(underlying)
+        if not orders:
+            continue
+        factor = _split_factor(info.get('ratio', ''))
+        adj = []
+        for o in orders:
+            sp = sq = None
+            if factor and o.get('price') is not None and o['shares'] > 0:
+                sp = round(o['price'] * factor, 4)
+                sq = round(o['shares'] / factor, 2)
+            adj.append({**o, 'suggested_price': sp, 'suggested_shares': sq})
+        records.append({
+            'underlying': underlying, 'event_type': 'split',
+            'amount_or_ratio': info.get('ratio', ''),
+            'split_factor': factor, 'orders': adj,
+        })
+
+    return records
+
+
+def print_gtc_matches(matches: list[dict]) -> None:
+    if not matches:
+        print("\n[GTC ORDERS] None of tomorrow's events touch a resting GTC order.")
+        return
+    print(f"\n{'='*60}\n  GTC ORDERS AFFECTED ({len(matches)} ticker(s))\n{'='*60}")
+    for rec in matches:
+        et = rec['event_type'].upper()
+        print(f"\n  {rec['underlying']}  [{et} {rec['amount_or_ratio']}] — {len(rec['orders'])} order(s):")
+        for o in rec['orders']:
+            who = o['trader']
+            if o['shares'] <= 0:
+                print(f"    [{who}] {o['side']} 0 shares (placeholder) @ ${o.get('price')}")
+                continue
+            line = f"    [{who}] {o['side']} {o['shares']:.0f} @ ${o.get('price')}"
+            if o.get('suggested_price') is not None:
+                line += f"  ->  suggest ${o['suggested_price']}"
+            if o.get('suggested_shares') is not None:
+                line += f" x {o['suggested_shares']:.0f} sh"
+            print(line)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -160,7 +264,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='Daily dividend & split checker')
     parser.add_argument('positions', help='Path to positions Excel file')
     parser.add_argument('--date',     help='Target date YYYY-MM-DD (default: next trading day)')
-    parser.add_argument('--gtc',      help='Path to GTC orders Excel file (optional)')
+    parser.add_argument('--no-gtc', action='store_true',
+                        help='Skip reading the GTC trader books (OneDrive folder)')
     parser.add_argument('--no-email', action='store_true', help='Skip sending email')
     parser.add_argument('--deep', action='store_true',
                         help='Full per-ticker StockAnalysis sweep (~30-45 min, rate-limit '
@@ -180,12 +285,12 @@ def main() -> None:
     position_map  = build_ticker_map(raw_tickers)
     logger.info(f"{len(position_map)} unique underlying tickers to check")
 
-    # GTC orders (placeholder — format TBD Monday)
-    gtc_map: dict[str, dict] = {}
-    if args.gtc:
-        gtc_tickers = read_positions(args.gtc)
-        gtc_map     = build_ticker_map(gtc_tickers)
-        logger.info(f"GTC: {len(gtc_map)} unique underlying tickers")
+    # GTC orders — auto-read the three trader books from the OneDrive folder
+    # (Ready_for_Sale sheet of each). {underlying: [order, ...]}.
+    gtc_map: dict[str, list[dict]] = {}
+    if not args.no_gtc:
+        gtc_map = build_gtc_map()
+        logger.info(f"GTC: {len(gtc_map)} unique underlyings across trader books")
 
     # 2. Scrape all sources
     # Splits 'effective' on a skipped weekend day take effect at the target
@@ -220,16 +325,15 @@ def main() -> None:
     position_splits    = filter_positions(position_map, all_splits)
     position_dividends = filter_positions(position_map, all_dividends)
 
-    # 4. GTC overlap (flag orders in affected tickers)
-    gtc_splits_hits    = filter_positions(gtc_map, all_splits)    if gtc_map else {}
-    gtc_dividend_hits  = filter_positions(gtc_map, all_dividends) if gtc_map else {}
-
-    if gtc_splits_hits or gtc_dividend_hits:
-        print("\n[GTC ORDERS REQUIRING ADJUSTMENT]")
-        for t, info in gtc_splits_hits.items():
-            print(f"  SPLIT  {t}  — GTC orders: {', '.join(info.get('originals', [t]))}")
-        for t, info in gtc_dividend_hits.items():
-            print(f"  DIV    {t}  amt={info.get('amount','?')}  — GTC orders: {', '.join(info.get('originals', [t]))}")
+    # 4. GTC overlap — match resting orders against tomorrow's events and
+    #    compute suggested limit adjustments.
+    gtc_matches = match_gtc_to_events(position_splits, position_dividends, gtc_map)
+    gtc_path = OUTPUT_DIR / f"gtc_matches_{target_date.isoformat()}.json"
+    with open(gtc_path, 'w') as f:
+        json.dump(gtc_matches, f, indent=2)
+    print_gtc_matches(gtc_matches)
+    if gtc_matches:
+        logger.info(f"GTC matches written: {gtc_path}")
 
     # 5. Print and write CSV
     print_summary(position_splits, position_dividends, target_date)
