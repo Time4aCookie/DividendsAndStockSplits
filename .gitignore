@@ -15,6 +15,9 @@ output/
 *.xlsx
 *.xls
 
+# GTC blotter CSV exports (extensionless, sensitive order data)
+GTC's_*
+
 # Claude Code session memory (machine-local)
 memory/
 

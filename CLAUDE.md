@@ -31,14 +31,25 @@ ls *.xlsx 2>/dev/null; ls *.xls 2>/dev/null
 - If multiple ambiguous files exist, show the list and ask the user which is which.
 - If no file is found, tell the user to drop the Excel into this folder and try again.
 
-**GTC order books are separate** — read automatically by the script, not dropped
-in this folder. They live in a OneDrive-synced folder and are updated IN PLACE
-each morning (so re-reading the same paths daily picks up fresh content):
-`C:\Users\Rohan\Jag Trading LLC\Jag Share - JAG Drive\brad new york`
-Three trader books (ALEX, CRAIG, JOSH), matched by filename signature, newest
-matching file per trader (robust to occasional re-dated filenames). They are
-old-format `.xls` (needs `xlrd`); orders are on the `Ready_for_Sale` sheet. The
-script warns if a trader's newest file is >4 days old (possible stale/missed update).
+**GTC orders come from TWO kinds of source, both read automatically by the script:**
+
+1. **Three morning trader books** — in a OneDrive-synced folder, updated IN PLACE
+   each morning (re-reading the same paths daily picks up fresh content):
+   `C:\Users\Rohan\Jag Trading LLC\Jag Share - JAG Drive\brad new york`
+   Traders ALEX, CRAIG, JOSH, matched by filename signature, newest matching file
+   per trader (robust to occasional re-dated filenames). Old-format `.xls` (needs
+   `xlrd`); orders on the `Ready_for_Sale` sheet. Warns if a trader's newest file
+   is >4 days old (possible stale/missed update).
+
+2. **Consolidated GTC blotter CSV** — dropped in THIS project folder daily ~3:35pm,
+   named `GTC's_<date>` (no extension; it's a REDI order-export CSV). ADDITIONAL to
+   the trader books, not a replacement (books = morning orders; this = resting GTCs).
+   Keep only rows with **Time In Force = GTC** AND **Status = Live** (ignore DAY/IOC/
+   filled). The CSV has UNQUOTED thousands-separator commas (`1,000`, `1,100.00`) so
+   rows are ragged — `gtc_reader.py` re-joins thousands groups before splitting, and
+   any GTC+Live row that still won't parse is recovered by left-anchored Symbol/Side
+   (never silently dropped). The script auto-deletes the prior day's `GTC's_*` file
+   when a newer one is present.
 
 ### Step 2 — Inspect the positions file and confirm the ticker column
 ```bash
@@ -277,12 +288,14 @@ When in doubt, err on the side of checking — a false positive is cheaper than 
 
 ## GTC Order Adjustment Logic
 
-The script reads the three trader books (see Step 1), parses `Ready_for_Sale`
-(`gtc_reader.py`), matches resting orders to tomorrow's events via the same
-underlying parser, and writes `output/gtc_matches_YYYY-MM-DD.json` plus a console
-section. **Fold GTC matches into the curated email**, lead line obvious:
-"You have GTC orders in TICKER" — then the per-order detail (trader, side, qty,
-current limit → suggested limit).
+The script reads BOTH GTC sources (see Step 1) — the three trader books
+(`Ready_for_Sale`) and the consolidated `GTC's_<date>` blotter CSV (GTC+Live
+rows only) — via `gtc_reader.build_gtc_map`, matches resting orders to tomorrow's
+events through the same underlying parser, and writes
+`output/gtc_matches_YYYY-MM-DD.json` plus a console section. **Fold GTC matches
+into the curated email**, lead line obvious: "You have GTC orders in TICKER" —
+then the per-order detail (source/trader, side, qty, current limit → suggested
+limit). Orders from the blotter CSV are tagged trader `GTC`; the others ALEX/CRAIG/JOSH.
 
 `Ready_for_Sale` layout (stable across all three books): header on the THIRD row
 (index 2); `Ticker` col, `Side` (`Buy`/`Sell Auto`), `Shares`, and the limit
@@ -384,7 +397,7 @@ DividendsAndStockSplits/
 ├── check_events.py      ← Main script (Claude runs this, not the user)
 ├── scrapers.py          ← All web scraping logic
 ├── ticker_utils.py      ← Ticker parsing & underlying extraction
-├── gtc_reader.py        ← Reads the 3 trader GTC books (.xls Ready_for_Sale)
+├── gtc_reader.py        ← Reads GTC sources: 3 trader .xls books + GTC's_<date> blotter CSV
 ├── email_sender.py      ← SMTP email (Gmail or Outlook, auto-detected)
 ├── compare.py           ← Python vs Claude comparison
 ├── test_all.py          ← Offline regression suite — run after ANY code change

@@ -14,10 +14,20 @@ dedicated reader separate from the positions reader:
   - Orders are laddered (same ticker at several price levels = several rows).
   - Some rows have 0 shares (saved placeholders) — kept, but flagged.
 
+A FOURTH source is the consolidated GTC blotter CSV dropped in the project folder
+each day ~3:35pm, named `GTC's_<date>` (no extension). It is ADDITIONAL to the
+three morning trader books, not a replacement. We keep only Time-In-Force == GTC
+and Status == Live rows. The CSV is a raw REDI export with UNQUOTED
+thousands-separator commas in numeric fields (`1,000`, `1,100.00`), so rows are
+ragged — we re-join thousands groups before splitting (carefully, so a decimal
+like Avg Px `0.000000` followed by an integer is NOT merged). See read_gtc_csv_orders.
+
 Requires xlrd (for .xls). Read-only — never writes to the trader files.
 """
 
 import os
+import re
+import csv
 import glob
 import datetime
 import logging
@@ -27,6 +37,19 @@ import xlrd
 from ticker_utils import get_underlying_candidates
 
 logger = logging.getLogger(__name__)
+
+# Project folder where the GTC's_<date> blotter CSV is dropped daily.
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+GTC_CSV_GLOB = "GTC's_*"
+
+# A thousands-separated number that is a STANDALONE field, not the tail of a
+# decimal. `(?<![\d.])` stops it attaching to a preceding decimal (Avg Px
+# `0.000000,958` stays two fields); the optional `(?:\.\d+)?` handles grouped
+# decimals like `1,100.00`; `(?![\d])` stops mid-number false matches.
+_THOUSANDS_RE = re.compile(r'(?<![\d.])\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d])')
+
+def _strip_thousands(line: str) -> str:
+    return _THOUSANDS_RE.sub(lambda m: m.group(0).replace(',', ''), line)
 
 # OneDrive-synced folder holding the trader order books. Override with env GTC_DIR.
 GTC_DIR = os.getenv(
@@ -162,19 +185,122 @@ def read_gtc_orders(path: str, trader: str) -> list[dict]:
     return orders
 
 
-def build_gtc_map(gtc_dir: str = GTC_DIR) -> dict[str, list[dict]]:
+# ---------------------------------------------------------------------------
+# Consolidated GTC blotter CSV (GTC's_<date>) — additional source
+# ---------------------------------------------------------------------------
+
+def find_gtc_csv(folder: str = PROJECT_DIR) -> str | None:
+    """Return the newest GTC's_<date> blotter file in `folder`, or None."""
+    matches = glob.glob(os.path.join(folder, GTC_CSV_GLOB))
+    matches = [p for p in matches if os.path.isfile(p)]
+    if not matches:
+        logger.info("GTC blotter CSV: none found (looked for GTC's_<date>)")
+        return None
+    return max(matches, key=os.path.getmtime)
+
+
+def purge_old_gtc_csv(keep_path: str, folder: str = PROJECT_DIR) -> None:
+    """Delete prior-day GTC's_<date> files, keeping only `keep_path`."""
+    for p in glob.glob(os.path.join(folder, GTC_CSV_GLOB)):
+        if os.path.isfile(p) and os.path.abspath(p) != os.path.abspath(keep_path):
+            try:
+                os.remove(p)
+                logger.info(f"GTC blotter: deleted old file {os.path.basename(p)}")
+            except OSError as e:
+                logger.warning(f"GTC blotter: could not delete {os.path.basename(p)}: {e}")
+
+
+def read_gtc_csv_orders(path: str) -> list[dict]:
     """
-    Read all trader books and return {underlying: [order, ...]}.
+    Parse the consolidated GTC blotter CSV. Keep only Time-In-Force == GTC and
+    Status == Live. Returns order dicts shaped like read_gtc_orders (trader='GTC').
+
+    Robustness: rows are re-joined for thousands separators then CSV-split. Any
+    GTC+Live row that still doesn't yield the expected column count is NOT
+    dropped — its Symbol/Side are recovered by fixed left-anchored position
+    (cols 3/4, always before the comma-bearing numeric fields) so a format quirk
+    can never silently hide a resting order; price/qty are left None and flagged.
+    """
+    lines = open(path, encoding='utf-8', errors='replace').read().splitlines()
+    if not lines:
+        return []
+    header = next(csv.reader([lines[0]]))
+    H = len(header)
+    idx = {name.strip(): i for i, name in enumerate(header)}
+    i_sym = idx.get('Symbol', 3)
+    i_side = idx.get('Side', 4)
+
+    def _is_gtc_live(line: str) -> bool:
+        return bool(re.search(r'(^|,)GTC(,|$)', line) and re.search(r'(^|,)Live(,|$)', line))
+
+    orders: list[dict] = []
+    recovered = 0
+    for ln in lines[1:]:
+        fields = next(csv.reader([_strip_thousands(ln)]))
+        if len(fields) == H:
+            rec = dict(zip(header, fields))
+            if rec.get('Time In Force', '').strip().upper() == 'GTC' and \
+               rec.get('Status', '').strip().lower() == 'live':
+                _num_px = _num(rec.get('Price', ''))
+                orders.append({
+                    'trader': 'GTC',
+                    'ticker': rec.get('Symbol', '').strip().upper(),
+                    'shares': _num(rec.get('Qty', '')) or 0.0,
+                    'side':   rec.get('Side', '').strip(),
+                    'price':  _num_px,
+                    'last': None, 'bid': None, 'ask': None,
+                    'account': rec.get('Portfolio', '').strip(),
+                    'row': None,
+                })
+        elif _is_gtc_live(ln):
+            # Parser fell short on a GTC+Live row — recover symbol/side, never drop.
+            raw = next(csv.reader([ln]))
+            sym = raw[i_sym].strip().upper() if len(raw) > i_sym else ''
+            if sym:
+                recovered += 1
+                orders.append({
+                    'trader': 'GTC', 'ticker': sym, 'shares': 0.0,
+                    'side': raw[i_side].strip() if len(raw) > i_side else '',
+                    'price': None, 'last': None, 'bid': None, 'ask': None,
+                    'account': '', 'row': None, 'parse_incomplete': True,
+                })
+
+    logger.info(f"GTC blotter ({os.path.basename(path)}): {len(orders)} GTC+Live orders"
+                + (f" ({recovered} recovered via fallback — verify)" if recovered else ""))
+    return orders
+
+
+def build_gtc_map(gtc_dir: str = GTC_DIR, project_dir: str = PROJECT_DIR) -> dict[str, list[dict]]:
+    """
+    Read all GTC sources and return {underlying: [order, ...]}:
+      - the three morning trader books (.xls, OneDrive), AND
+      - the consolidated GTC blotter CSV (GTC's_<date>, project folder).
     Each order is filed under EVERY candidate underlying of its ticker (so an
     option/preferred/warrant order matches the event's underlying), matching the
     positions parser's behavior.
     """
     gtc_map: dict[str, list[dict]] = {}
+
+    def _file(order):
+        for underlying, _itype in get_underlying_candidates(order['ticker']):
+            gtc_map.setdefault(underlying, []).append(order)
+
+    # Three morning trader books
     for trader, path in find_gtc_files(gtc_dir).items():
         try:
             for order in read_gtc_orders(path, trader):
-                for underlying, _itype in get_underlying_candidates(order['ticker']):
-                    gtc_map.setdefault(underlying, []).append(order)
+                _file(order)
         except Exception as e:
             logger.error(f"GTC {trader}: failed to read ({type(e).__name__}: {e})")
+
+    # Consolidated GTC blotter CSV (additional source)
+    csv_path = find_gtc_csv(project_dir)
+    if csv_path:
+        try:
+            for order in read_gtc_csv_orders(csv_path):
+                _file(order)
+            purge_old_gtc_csv(keep_path=csv_path, folder=project_dir)
+        except Exception as e:
+            logger.error(f"GTC blotter CSV: failed to read ({type(e).__name__}: {e})")
+
     return gtc_map

@@ -338,6 +338,40 @@ check('split shares /10', by['PUCKU']['orders'][0]['suggested_shares'], 10.0)
 check('event with no GTC order omitted',
       [r for r in match_gtc_to_events({}, {'ZZZZ': {'amount': '$1'}}, GTC)], [])
 
+print('\n=== GTC blotter CSV parser (thousands-comma corruption) ===')
+import tempfile, os as _os
+import gtc_reader
+
+_HDR = ",Cancel,Time,Symbol,Side,Qty,-,Price,+,Status,Time In Force,Traded,Avg Px,Qty Left,Change,Route,Portfolio,Order Id"
+_CSV = "\n".join([
+    _HDR,
+    # clean GTC+Live, no commas
+    "1,,9:00:00,ACHR,BUY,1, -  0.01,3.50, +  0.01,Live,GTC,0,0.000000,1,,NASDAQ,91JBJG09-STK,AAA-1",
+    # Qty thousands (1,000) + Avg Px decimal followed by Qty Left (must NOT merge)
+    "2,,9:01:00,AACBR,BUY,1,000, -  0.01,0.15, +  0.01,Live,GTC,204,0.000000,796,,NASDAQ,91JBJG09-STK,BBB-2",
+    # multiple thousands groups in Qty/Traded/Qty Left
+    "938,,9:02:00,PGACU,BUY,5,000, -  0.01,10.21, +  0.01,Live,GTC,1,255,0.000000,3,745,,NASDAQ,91JBJG09-STK,CCC-3",
+    # thousands inside a DECIMAL price (1,100.00) AND row-number with comma (1,118)
+    "1,118,,9:03:00,SNDK,BUY,1, -  0.01,1,100.00, +  0.01,Live,GTC,0,0.000000,1,,NASDAQ,91JBJG09-STK,DDD-4",
+    # excluded: DAY order
+    "3,,9:04:00,XOM,BUY,100, -  0.01,50.00, +  0.01,Live,DAY,0,0.000000,100,,NASDAQ,91JBJG09-STK,EEE-5",
+    # excluded: GTC but Filled (not Live)
+    "4,,9:05:00,IBM,BUY,100, -  0.01,200.00, +  0.01,Filled,GTC,100,200.00,0,,NASDAQ,91JBJG09-STK,FFF-6",
+])
+_tmp = _os.path.join(tempfile.gettempdir(), "GTC's_2099-01-01")
+open(_tmp, 'w', encoding='utf-8').write(_CSV)
+co = gtc_reader.read_gtc_csv_orders(_tmp)
+_os.remove(_tmp)
+by = {o['ticker']: o for o in co}
+check('only GTC+Live kept (4 of 6)', sorted(by), ['AACBR', 'ACHR', 'PGACU', 'SNDK'])
+check('DAY excluded', 'XOM' not in by, True)
+check('GTC-but-Filled excluded', 'IBM' not in by, True)
+check('Qty thousands joined (1,000->1000)', by['AACBR']['shares'], 1000.0)
+check('AACBR price intact (Avg Px not merged into price)', by['AACBR']['price'], 0.15)
+check('multi-group qty (5,000)', by['PGACU']['shares'], 5000.0)
+check('decimal-thousands price (1,100.00->1100.0)', by['SNDK']['price'], 1100.0)
+check('source labeled GTC', by['ACHR']['trader'], 'GTC')
+
 print('\n=== next_trading_day ===')
 from check_events import next_trading_day
 check('Wed -> Thu', next_trading_day(datetime.date(2026, 6, 10)), datetime.date(2026, 6, 11))
